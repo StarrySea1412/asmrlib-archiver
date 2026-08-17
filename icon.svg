@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5C3D2E;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2B1D14;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F5EFE6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#B96420;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="128" cy="128" r="120" fill="url(#bg)"/>
+
+  <!-- Headphone band -->
+  <path d="M 70 128 Q 70 70, 128 60 Q 186 70, 186 128"
+        fill="none" stroke="url(#accent)" stroke-width="12"
+        stroke-linecap="round"/>
+
+  <!-- Left ear cup -->
+  <rect x="50" y="115" width="35" height="50" rx="8"
+        fill="url(#accent)" opacity="0.9"/>
+  <rect x="55" y="120" width="25" height="40" rx="6"
+        fill="#2B1D14" opacity="0.5"/>
+
+  <!-- Right ear cup -->
+  <rect x="171" y="115" width="35" height="50" rx="8"
+        fill="url(#accent)" opacity="0.9"/>
+  <rect x="176" y="120" width="25" height="40" rx="6"
+        fill="#2B1D14" opacity="0.5"/>
+
+  <!-- Sound waves (left) -->
+  <path d="M 35 128 Q 30 128, 30 128"
+        fill="none" stroke="#F5EFE6" stroke-width="3"
+        stroke-linecap="round" opacity="0.6"/>
+  <path d="M 30 118 Q 20 118, 18 128 Q 20 138, 30 138"
+        fill="none" stroke="#F5EFE6" stroke-width="2.5"
+        stroke-linecap="round" opacity="0.4"/>
+  <path d="M 25 108 Q 12 108, 8 128 Q 12 148, 25 148"
+        fill="none" stroke="#F5EFE6" stroke-width="2"
+        stroke-linecap="round" opacity="0.3"/>
+
+  <!-- Sound waves (right) -->
+  <path d="M 221 128 Q 226 128, 226 128"
+        fill="none" stroke="#F5EFE6" stroke-width="3"
+        stroke-linecap="round" opacity="0.6"/>
+  <path d="M 226 118 Q 236 118, 238 128 Q 236 138, 226 138"
+        fill="none" stroke="#F5EFE6" stroke-width="2.5"
+        stroke-linecap="round" opacity="0.4"/>
+  <path d="M 231 108 Q 244 108, 248 128 Q 244 148, 231 148"
+        fill="none" stroke="#F5EFE6" stroke-width="2"
+        stroke-linecap="round" opacity="0.3"/>
+
+  <!-- Center play button -->
+  <circle cx="128" cy="185" r="22" fill="#B96420" opacity="0.9"/>
+  <path d="M 122 177 L 122 193 L 136 185 Z"
+        fill="#F5EFE6"/>
+</svg>

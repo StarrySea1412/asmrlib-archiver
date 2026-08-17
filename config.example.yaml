@@ -1,0 +1,101 @@
+seeds: []
+
+# 往这里加更多 /tags/<slug> 即可发现更多帖子；viewer 的「实时浏览」也会读这个列表。
+tag_seeds:
+  - "https://asmrlib.com/tags/yoonying"
+  # - "https://asmrlib.com/tags/another-tag"
+
+allowed_domains:
+  - "asmrlib.com"
+
+allow_subdomains: false
+output_dir: "./data"
+database_path: "./data/archive.sqlite3"
+
+crawler:
+  user_agent: "ASMRLIBPersonalArchiver/0.1 (+local personal archive)"
+  timeout_seconds: 30
+  delay_seconds: 3
+  retries: 2
+  obey_robots: true
+  robots_fail_closed: false
+  redirect_policy: "same_domain_only"  # none | same_domain_only
+  max_redirects: 2
+  max_response_bytes: 5242880
+
+discovery:
+  enabled: true
+  max_pages_per_tag: 100
+  max_posts_per_tag: 2000
+  page_batch_size: 20
+  max_page_bytes: 5242880
+
+browser:
+  enabled: false
+  headless: true
+  javascript: false
+  wait_until: "domcontentloaded"
+  timeout_seconds: 30
+  block_resource_types:
+    - "image"
+    - "font"
+    - "media"
+    - "websocket"
+    - "eventsource"
+  # 抓取阶段与桌面受控播放器共用的广告/追踪过滤词。
+  block_url_keywords:
+    - "doubleclick"
+    - "googlesyndication"
+    - "google-analytics"
+    - "googletagmanager"
+    - "adservice"
+    - "adsystem"
+    - "adserver"
+    - "adsterra"
+    - "exoclick"
+    - "popads"
+    - "propeller"
+    - "tracking"
+    - "telemetry"
+    - "histats"
+    - "wpadmngr"
+    - "downrightfootball"
+    - "dtscout"
+    - "llvpn"
+    - "rtmark"
+    - "luugy"
+    - "sead.pages"
+    - "popunder"
+    - "clickunder"
+    - "outbrain"
+    - "taboola"
+
+download:
+  enabled: true
+  allow_external_media: false
+  allowed_media_domains: []
+  redirect_policy: "same_domain_only"  # none | same_domain_only
+  max_redirects: 2
+  timeout_seconds: 60
+  chunk_size: 1048576
+  max_file_mb: 2048
+  overwrite: false
+  allowed_content_types:
+    - "video/"
+    - "audio/"
+    - "application/octet-stream"
+  allowed_extensions:
+    - ".mp4"
+    - ".m4v"
+    - ".mkv"
+    - ".webm"
+    - ".mov"
+    - ".mp3"
+    - ".m4a"
+    - ".aac"
+    - ".wav"
+    - ".flac"
+    - ".ogg"
+
+# 兼容旧配置：已有 recorder: 块可以保留，轻量版会忽略其中所有字段。
+recorder: {}
