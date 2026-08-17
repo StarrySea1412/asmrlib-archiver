@@ -92,9 +92,26 @@ class DbConnection:
     @staticmethod
     def open(path: Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, check_same_thread=False)
+        # This single connection is shared across the HTTP server's request
+        # threads and any background crawl/discovery thread the viewer spins
+        # up (ArchiveViewer._kick_background_crawl /
+        # start_background_tag_sync). Under the default rollback-journal
+        # mode a writer holds an exclusive lock for its whole transaction,
+        # so a multi-second background crawl write could make a concurrent
+        # page read fail with "database is locked". WAL lets readers and one
+        # writer proceed concurrently; busy_timeout makes SQLite retry for a
+        # while instead of failing immediately when two writers do collide;
+        # the connect-level timeout backs that up for the very first lock
+        # acquisition before busy_timeout even takes effect.
+        conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        # NORMAL is safe under WAL (only fsyncs at checkpoints) and avoids an
+        # fsync on every commit, which matters given the per-row commits in
+        # ItemRepo/MediaRepo's update paths.
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def close(self) -> None:
