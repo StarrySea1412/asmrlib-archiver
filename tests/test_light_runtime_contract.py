@@ -41,9 +41,17 @@ class LightRuntimeRouteTests(unittest.TestCase):
         self.viewer.close()
         self.temp_dir.cleanup()
 
-    def request(self, method: str, path: str, body: bytes = b"") -> tuple[int, dict, bytes]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: bytes = b"",
+        *,
+        extra_headers: dict | None = None,
+    ) -> tuple[int, dict, bytes]:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
         headers = {"Content-Type": "application/json"} if body else {}
+        headers.update(extra_headers or {})
         conn.request(method, path, body=body, headers=headers)
         response = conn.getresponse()
         payload = response.read()
@@ -94,6 +102,50 @@ class LightRuntimeRouteTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("application/json", headers.get("Content-Type", ""))
             self.assertFalse(json.loads(payload)["ok"])
+
+    def test_options_preflight_advertises_no_cors_grant(self) -> None:
+        """Management endpoints must not be reachable cross-origin.
+
+        No Access-Control-Allow-Origin means browsers refuse to follow a
+        cross-origin fetch() preflight with the real request -- closing the
+        hole where any page open in the user's browser could otherwise
+        blind-delete local media by iterating ids against this fixed port.
+        """
+        status, headers, _ = self.request("OPTIONS", "/recordings/delete")
+        self.assertEqual(status, 204)
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+        self.assertNotIn("Access-Control-Allow-Methods", headers)
+
+    def test_post_from_foreign_origin_is_rejected(self) -> None:
+        status, _, payload = self.request(
+            "POST",
+            "/recordings/delete",
+            b"{}",
+            extra_headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(status, 403)
+        self.assertFalse(json.loads(payload)["ok"])
+
+    def test_post_from_matching_origin_is_accepted(self) -> None:
+        status, _, payload = self.request(
+            "POST",
+            "/recordings/delete",
+            b"{}",
+            extra_headers={"Origin": f"http://{self.host}:{self.port}"},
+        )
+        self.assertEqual(status, 200)
+        # Missing id, not a same-origin rejection -- proves the origin check
+        # passed and normal endpoint validation ran instead.
+        self.assertFalse(json.loads(payload)["ok"])
+        self.assertEqual(json.loads(payload)["error"], "missing id")
+
+    def test_post_without_origin_header_is_accepted(self) -> None:
+        """Plain <form>/XHR same-origin posts often omit Origin entirely."""
+        status, _, payload = self.request("POST", "/recordings/delete", b"{}")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(payload)["ok"])
+        self.assertEqual(json.loads(payload)["error"], "missing id")
+
 
     def test_watch_is_validated_external_browser_landing_page(self) -> None:
         target = "https://bysetayico.com/e/abc?token=1"

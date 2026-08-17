@@ -446,19 +446,20 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                 viewer.handle_post(self)
 
             def do_OPTIONS(self) -> None:  # noqa: N802
-                # Keep a small same-origin preflight response for clients that
-                # use the JSON management endpoints. Online recording no
-                # longer posts chunks to this server.
+                # No CORS grant here, on purpose. This is a same-origin
+                # local app; its POST endpoints (delete/rename media,
+                # add/remove tags, ...) carry no auth beyond "the request
+                # came from this browser tab". A wildcard
+                # Access-Control-Allow-Origin used to let ANY page open
+                # in the user's browser -- including a malicious site in
+                # another tab -- call these endpoints cross-origin, e.g.
+                # blind-deleting local media by iterating ids. The
+                # viewer's own same-origin JS never needs a CORS grant to
+                # call same-origin fetch(); omitting the header is
+                # correct -- browsers refuse cross-origin callers at the
+                # preflight step.
                 handler = self
                 handler.send_response(204)
-                handler.send_header("Access-Control-Allow-Origin", "*")
-                handler.send_header(
-                    "Access-Control-Allow-Methods", "POST, GET, OPTIONS"
-                )
-                handler.send_header(
-                    "Access-Control-Allow-Headers", "Content-Type, Content-Length"
-                )
-                handler.send_header("Access-Control-Max-Age", "3600")
                 handler.send_header("Content-Length", "0")
                 handler.end_headers()
 
@@ -597,6 +598,26 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
 
     # --------------------------------------------------------- management API
 
+    def _origin_is_same_site(self, handler: BaseHTTPRequestHandler) -> bool:
+        origin = handler.headers.get("Origin", "").strip()
+        if not origin:
+            return True
+        host_header = handler.headers.get("Host", "").strip().lower()
+        if not host_header:
+            return False
+        try:
+            origin_parts = urlparse(origin)
+            origin_host = (origin_parts.hostname or "").lower()
+            origin_port = origin_parts.port
+        except ValueError:
+            return False
+        if not origin_host:
+            return False
+        origin_netloc = (
+            origin_host if origin_port is None else f"{origin_host}:{origin_port}"
+        )
+        return origin_netloc == host_header
+
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         """POST endpoints for local media and library metadata management."""
         parsed = urlparse(handler.path)
@@ -604,6 +625,13 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
         try:
             if self._is_retired_path(path):
                 self._send_retired(handler, path)
+                return
+            if not self._origin_is_same_site(handler):
+                self._send_json(
+                    handler,
+                    {"ok": False, "error": "cross_origin_request_rejected"},
+                    status=403,
+                )
                 return
             if path == "/recordings/delete":
                 length = int(handler.headers.get("Content-Length") or 0)
