@@ -19,88 +19,17 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-
-DEFAULT_PLAYER_DOMAINS = (
-    "asmrlib.com",
-    "bysetayico.com",
-    "v.upn.one",
-    "upn.one",
-    "abyssplayer.com",
-    "q8y5z.com",
+from .security_lists import (
+    ASSET_DOMAINS as DEFAULT_ASSET_DOMAINS,
+    BLOCK_URL_KEYWORDS as DEFAULT_BLOCK_URL_KEYWORDS,
+    BLOCKED_HOSTS as DEFAULT_BLOCKED_HOSTS,
+    PLAYER_DOMAINS as DEFAULT_PLAYER_DOMAINS,
 )
 
-DEFAULT_ASSET_DOMAINS = (
-    "img-place.com",
-    "imgbox.com",
-    "images2.imgbox.com",
-    "videothumbs.me",
-    "i1.wp.com",
-    "i0.wp.com",
-    "i2.wp.com",
-    "jwplayer.com",
-    "jwpcdn.com",
-    "cdn.jwplayer.com",
-    "ssl.p.jwpcdn.com",
-    "cloudflareinsights.com",
-    "imasdk.googleapis.com",
-)
-
-# Keep this list broad enough to cover the ad hosts historically seen in the
-# embedded BI/UP players.  Host matching always uses a label boundary.
-DEFAULT_BLOCKED_HOSTS = (
-    "doubleclick.net",
-    "googlesyndication.com",
-    "google-analytics.com",
-    "googletagmanager.com",
-    "googleadservices.com",
-    "adservice.google.com",
-    "amazon-adsystem.com",
-    "adsterra.com",
-    "exoclick.com",
-    "popads.net",
-    "propellerads.com",
-    "histats.com",
-    "wpadmngr.com",
-    "sead.pages.dev",
-    "downrightfootball.com",
-    "dtscout.com",
-    "llvpn.com",
-    "rtmark.net",
-    "luugy.com",
-    "bit.ly",
-    "goo.gl",
-    "t.co",
-    "tinyurl.com",
-)
-
-DEFAULT_BLOCK_URL_KEYWORDS = (
-    "doubleclick",
-    "googlesyndication",
-    "google-analytics",
-    "googletagmanager",
-    "googleadservices",
-    "adservice",
-    "adsystem",
-    "adserver",
-    "adsterra",
-    "exoclick",
-    "popads",
-    "propeller",
-    "tracking",
-    "telemetry",
-    "histats",
-    "wpadmngr",
-    "downrightfootball",
-    "dtscout",
-    "llvpn",
-    "rtmark",
-    "luugy",
-    "sead.pages",
-    "popunder",
-    "clickunder",
-    "outbrain",
-    "taboola",
-)
+# NOTE: the four DEFAULT_* tables above are imported from security_lists.py,
+# the single source of truth shared with guards.py and
+# viewer/player_guard.py. Edit the tables there, not here. They stay
+# re-exported from this module (see __all__) so existing importers work.
 
 _MEDIA_CONTEXTS = frozenset(
     {"media", "fetch", "xhr", "websocket", "eventsource", "manifest", "other"}

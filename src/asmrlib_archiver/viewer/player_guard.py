@@ -9,35 +9,14 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit, urlunsplit
 
-
-DEFAULT_PLAYER_DOMAINS = (
-    "asmrlib.com",
-    "bysetayico.com",
-    "v.upn.one",
-    "upn.one",
-    "abyssplayer.com",
-    "q8y5z.com",
+from ..security_lists import (
+    BLOCKED_HOSTS as DEFAULT_BLOCKED_HOSTS,
+    PLAYER_DOMAINS as DEFAULT_PLAYER_DOMAINS,
 )
 
-DEFAULT_BLOCKED_HOSTS = (
-    "doubleclick.net",
-    "googlesyndication.com",
-    "google-analytics.com",
-    "googletagmanager.com",
-    "adservice.google.com",
-    "adsterra.com",
-    "exoclick.com",
-    "popads.net",
-    "propellerads.com",
-    "histats.com",
-    "wpadmngr.com",
-    "downrightfootball.com",
-    "dtscout.com",
-    "llvpn.com",
-    "rtmark.net",
-    "luugy.com",
-    "sead.pages.dev",
-)
+# NOTE: both DEFAULT_* tables above are imported from security_lists.py, the
+# single source of truth shared with guards.py and online_shield.py. Edit the
+# tables there, not here; they stay re-exported so existing importers work.
 
 
 class PlayerUrlError(ValueError):

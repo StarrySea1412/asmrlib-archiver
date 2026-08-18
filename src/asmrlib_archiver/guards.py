@@ -5,42 +5,12 @@ import unicodedata
 from dataclasses import dataclass
 from urllib.parse import quote, unquote_to_bytes, urldefrag, urljoin, urlparse, urlunparse
 
+from .security_lists import AD_DOMAIN_ALIASES, BLOCKED_HOSTS as DEFAULT_AD_DOMAINS
 
-DEFAULT_AD_DOMAINS = frozenset(
-    {
-        "adsterra.com",
-        "amazon-adsystem.com",
-        "bit.ly",
-        "doubleclick.net",
-        "downrightfootball.com",
-        "exoclick.com",
-        "google-analytics.com",
-        "googleadservices.com",
-        "googlesyndication.com",
-        "googletagmanager.com",
-        "histats.com",
-        "popads.net",
-        "propellerads.com",
-        "sead.pages.dev",
-        "wpadmngr.com",
-    }
-)
-
-# 把配置里常用的短关键词（如 "doubleclick"）展开成实际广告域名，
-# 这样 ad_keywords 既可当 host 子串过滤，也可当域名白名单扩展。
-# 被 UrlGuard.__init__ 在构造 ad_domains 时消费。
-AD_DOMAIN_ALIASES = {
-    "adservice": ("adservice.google.com", "googleadservices.com"),
-    "adsystem": ("amazon-adsystem.com",),
-    "adsterra": ("adsterra.com",),
-    "doubleclick": ("doubleclick.net",),
-    "exoclick": ("exoclick.com",),
-    "google-analytics": ("google-analytics.com",),
-    "googlesyndication": ("googlesyndication.com",),
-    "googletagmanager": ("googletagmanager.com",),
-    "popads": ("popads.net",),
-    "propeller": ("propellerads.com",),
-}
+# NOTE: DEFAULT_AD_DOMAINS and AD_DOMAIN_ALIASES are imported above from
+# security_lists.py, the single source of truth shared with online_shield.py
+# and viewer/player_guard.py. Edit the tables there, not here; existing
+# importers of this module keep working unchanged.
 
 _TAG_PATH_RE = re.compile(r"^/tags/([^/]+)/?$")
 _POST_PATH_RE = re.compile(r"^/posts/([0-9a-fA-F]{32})/?$")
