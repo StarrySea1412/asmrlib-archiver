@@ -72,10 +72,11 @@ def _has_database(root: Path) -> bool:
     database = root / "data" / "archive.sqlite3"
     if not database.is_file() or database.stat().st_size <= 0:
         return False
+    conn = None
     try:
         uri = f"file:{database.as_posix()}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
-            row = conn.execute("PRAGMA quick_check").fetchone()
+        conn = sqlite3.connect(uri, uri=True)
+        row = conn.execute("PRAGMA quick_check").fetchone()
         return bool(row and str(row[0]).lower() == "ok")
     except sqlite3.OperationalError as exc:
         # A valid database can be locked by a running app. Size is a safer
@@ -83,6 +84,9 @@ def _has_database(root: Path) -> bool:
         return "locked" in str(exc).lower()
     except (OSError, sqlite3.DatabaseError):
         return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _state_sources(final_dir: Path) -> tuple[Path | None, Path | None]:
@@ -245,22 +249,32 @@ def _pyinstaller_command(stage_dist: Path, work_dir: Path) -> list[str]:
 
 def _swap_output(staged: Path, final: Path) -> Path | None:
     """Install staged code without deleting an existing package."""
+    import time
+
     backup: Path | None = None
     if final.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         backup = DIST_ROOT / f"{DIST_NAME}.old-{stamp}"
+        for attempt in range(5):
+            try:
+                final.rename(backup)
+                break
+            except OSError as exc:
+                if attempt == 4:
+                    raise RuntimeError(
+                        f"cannot replace {final}; close the running app and retry: {exc}"
+                    ) from exc
+                time.sleep(0.6)
+    for attempt in range(5):
         try:
-            final.rename(backup)
-        except OSError as exc:
-            raise RuntimeError(
-                f"cannot replace {final}; close the running app and retry: {exc}"
-            ) from exc
-    try:
-        staged.rename(final)
-    except Exception:
-        if backup is not None and not final.exists():
-            backup.rename(final)
-        raise
+            staged.rename(final)
+            break
+        except Exception:
+            if attempt == 4:
+                if backup is not None and not final.exists():
+                    backup.rename(final)
+                raise
+            time.sleep(0.6)
     return backup
 
 
