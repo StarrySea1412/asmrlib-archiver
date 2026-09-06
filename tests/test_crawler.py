@@ -104,11 +104,13 @@ class CrawlerIntegrationTests(unittest.TestCase):
 
         FakeHttpClient.pages = {
             POST_ONE: """
-                <main><h1>First post</h1><a href="/tags/yoonying">yoonying</a></main>
+                <main><h1>First post</h1><a href="/tags/yoonying">yoonying</a>
+                <video src="https://asmrlib.com/cdn/first.mp4" controls></video></main>
                 <script src="https://s10.histats.com/js15_as.js"></script>
             """,
             POST_TWO: """
-                <main><h1>Second post</h1><a href="/tags/yoonying">yoonying</a></main>
+                <main><h1>Second post</h1><a href="/tags/yoonying">yoonying</a>
+                <video src="https://asmrlib.com/cdn/second.mp4" controls></video></main>
                 <div><a href="https://bit.ly/fulise">promotion</a></div>
             """,
         }
@@ -127,7 +129,9 @@ class CrawlerIntegrationTests(unittest.TestCase):
         self.assertIn("[post 2/2]", post_progress[1])
         self.assertIn(POST_TWO, post_progress[1])
         counts = self.archiver.status()
-        self.assertEqual(counts["items.archived"], 2)
+        # Items carry a media candidate in "pending" status, so the crawl
+        # writes "crawled" (media still to be downloaded) rather than "archived".
+        self.assertEqual(counts["items.crawled"], 2)
         self.assertEqual(counts["tag_items.total"], 2)
         for html_path in self.config.output_dir.joinpath("html").glob("*.html"):
             self.assertTrue(is_safe_archive_html(html_path.read_text(encoding="utf-8")))

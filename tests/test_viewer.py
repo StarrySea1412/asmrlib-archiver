@@ -385,9 +385,17 @@ class ViewerTests(unittest.TestCase):
             local_media=[{"label": "Audio", "src": "videos/sample.mp3", "kind": "audio"}],
         )
         self.assertTrue(is_safe_archive_html(html))
-        self.assertIn('<audio controls preload="metadata" src="videos/sample.mp3">', html)
-        unsafe = html.replace('src="videos/sample.mp3"', 'src="https://evil.example/x.mp3"')
+        # Archives are served at /file/html/<key>.html, media at
+        # /file/videos/<x>, so the src is rewritten to ../videos/<x> to resolve
+        # correctly (a bare videos/<x> would 404 under /file/html/...).
+        self.assertIn(
+            '<audio controls preload="metadata" src="../videos/sample.mp3">', html
+        )
+        unsafe = html.replace('src="../videos/sample.mp3"', 'src="https://evil.example/x.mp3"')
         self.assertFalse(is_safe_archive_html(unsafe))
+        # A deeper traversal that would escape the archive root must also fail.
+        traversal = html.replace('src="../videos/sample.mp3"', 'src="../../etc/passwd"')
+        self.assertFalse(is_safe_archive_html(traversal))
 
 
 if __name__ == "__main__":

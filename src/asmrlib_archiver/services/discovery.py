@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 from ..archive_html import render_tag_archive
 from ..guards import BlockedUrl
 from ..http_client import SafeHttpClient
 from .base import ServiceBase
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -137,6 +140,7 @@ class DiscoveryService(ServiceBase):
         except Exception as exc:
             blocked = isinstance(exc, BlockedUrl) or "blocked" in str(exc).lower()
             status = "blocked" if blocked else "error"
+            self._log_discovery_failure(page_url, exc, blocked)
             self.ctx.db.mark_tag_page_failed(
                 tag_url,
                 page_url,
@@ -144,3 +148,40 @@ class DiscoveryService(ServiceBase):
                 error=self._safe_error(exc),
             )
             stats.pages_failed += 1
+
+    def _log_discovery_failure(
+        self, page_url: str, exc: Exception, blocked: bool
+    ) -> None:
+        """Distinguish site-layout changes from real code bugs in logs.
+
+        tag_layout_error / redirect-mismatch / content-type / size / robots /
+        blocked are expected when asmrlib ships a new tag-page structure; log
+        them at WARNING. Everything else is unexpected and gets ERROR + a
+        traceback so a genuine bug isn't drowned out by a site revamp.
+        """
+        message = str(exc).lower()
+        is_layout_or_policy = blocked or any(
+            marker in message
+            for marker in (
+                "robots_disallow",
+                "tag_redirect_mismatch",
+                "tag_layout_error",
+                "missing_page_content_type",
+                "unexpected_page_content_type",
+                "page_too_large",
+            )
+        )
+        if is_layout_or_policy:
+            logger.warning(
+                "discovery failure (site/policy) url=%s exc=%s: %s",
+                page_url,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.exception(
+                "discovery failure (unexpected) url=%s exc=%s: %s",
+                page_url,
+                type(exc).__name__,
+                exc,
+            )

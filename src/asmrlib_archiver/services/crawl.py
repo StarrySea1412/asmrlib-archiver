@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from ..guards import BlockedUrl
 from ..http_client import SafeHttpClient
 from .base import ServiceBase
+
+logger = logging.getLogger(__name__)
 
 
 class CrawlService(ServiceBase):
@@ -51,10 +55,35 @@ class CrawlService(ServiceBase):
                     parsed = self.ctx.parser.parse(source_url, fetch_result.text)
                     if not parsed.title or not parsed.tags:
                         raise RuntimeError("post_layout_error:missing_title_or_tags")
+                    if not parsed.media:
+                        # Page parsed fine but carries no media references at
+                        # all — a real content state, not a crash. Mark it
+                        # no_media_found so retry-errors doesn't loop on it
+                        # forever, but surface it separately from generic
+                        # errors so a site-wide layout change (which usually
+                        # drops title/tags too) stays distinguishable.
+                        self.ctx.db.update_item_result(
+                            source_url,
+                            title=parsed.title,
+                            author=parsed.author,
+                            published_at=parsed.published_at,
+                            cover=parsed.cover,
+                            status="no_media_found",
+                            error="",
+                        )
+                        failed += 1
+                        self._report(
+                            f"[post {index}/{total}] No media found {source_url}"
+                        )
+                        logger.info(
+                            "crawl no_media_found url=%s title=%r", source_url, parsed.title
+                        )
+                        continue
                     self._save_parse_result(parsed)
                     ok += 1
                     self._report(f"[post {index}/{total}] Archived {source_url}")
                 except Exception as exc:
+                    self._log_crawl_failure(source_url, exc)
                     self.ctx.db.update_item_result(
                         source_url,
                         status="blocked" if "blocked" in str(exc).lower() else "error",
@@ -65,6 +94,42 @@ class CrawlService(ServiceBase):
         finally:
             client.close()
         return ok, failed
+
+    def _log_crawl_failure(self, source_url: str, exc: Exception) -> None:
+        """Distinguish code bugs from site layout changes in logs.
+
+        Layout/policy problems are expected fallout from asmrlib changing its
+        page structure; they're WARNING-level. Anything else is an unexpected
+        code failure and gets the full ERROR treatment with a traceback so a
+        real bug isn't lost under the noise of a site revamp.
+        """
+        message = str(exc).lower()
+        is_layout_or_policy = any(
+            marker in message
+            for marker in (
+                "robots_disallow",
+                "post_redirect_mismatch",
+                "post_layout_error",
+                "missing_page_content_type",
+                "unexpected_page_content_type",
+                "page_too_large",
+                "blocked",
+            )
+        ) or isinstance(exc, BlockedUrl)
+        if is_layout_or_policy:
+            logger.warning(
+                "crawl failure (site/policy) url=%s exc=%s: %s",
+                source_url,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.exception(
+                "crawl failure (unexpected) url=%s exc=%s: %s",
+                source_url,
+                type(exc).__name__,
+                exc,
+            )
 
     def run_covers_only(self, limit: int = 20) -> tuple[int, int]:
         """Backfill only the cover for archived items that have no cover yet.

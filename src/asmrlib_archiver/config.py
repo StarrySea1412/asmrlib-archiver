@@ -52,14 +52,12 @@ class DiscoveryConfig:
 
 @dataclass(frozen=True)
 class BrowserConfig:
-    enabled: bool = False
-    headless: bool = True
-    javascript: bool = False
-    wait_until: str = "domcontentloaded"
-    timeout_seconds: int = 30
-    block_resource_types: list[str] = field(
-        default_factory=lambda: ["image", "font", "media", "websocket", "eventsource"]
-    )
+    """Ad/tracker URL-keyword filter shared by the crawler, downloader and
+    online shield. Named ``browser`` for historical reasons (this used to
+    drive a Playwright fetch path with headless/JS/timing knobs); all of
+    those fields are gone now and only ``block_url_keywords`` is consumed.
+    """
+
     block_url_keywords: list[str] = field(
         default_factory=lambda: [
             "doubleclick",

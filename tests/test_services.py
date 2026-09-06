@@ -126,6 +126,57 @@ class ServiceStandaloneTests(unittest.TestCase):
         finally:
             ctx.db.close()
 
+    def test_crawl_marks_no_media_found_separately_from_errors(self) -> None:
+        # A post that parses cleanly (title + tags) but carries no media
+        # references should land in no_media_found, not error — and the retry
+        # queue must not keep pulling it forever (it's a real content state).
+        ctx = _make_ctx(self.root, tag_seeds=["https://asmrlib.com/tags/yoonying"])
+        try:
+            source_url = "https://asmrlib.com/posts/" + "1" * 32
+            ctx.db.add_seed(source_url)
+            from unittest.mock import patch
+
+            from asmrlib_archiver.http_client import FetchResult
+            from asmrlib_archiver.services.crawl import CrawlService
+
+            class FakeClient:
+                def __init__(self, *_a, **_k) -> None:
+                    pass
+
+                def close(self) -> None:
+                    pass
+
+                def fetch_page(self, url: str) -> FetchResult:
+                    return FetchResult(
+                        url=url,
+                        content=(
+                            "<main><h1>Text only</h1>"
+                            '<a href="/tags/yoonying">yoonying</a></main>'
+                        ).encode("utf-8"),
+                        content_type="text/html",
+                        history=[],
+                    )
+
+            with patch("asmrlib_archiver.services.crawl.SafeHttpClient", FakeClient):
+                ok, failed = CrawlService(ctx).run(limit=5)
+
+            self.assertEqual(ok, 0)
+            self.assertEqual(failed, 1)
+            row = ctx.db.get_item(source_url)
+            self.assertEqual(row["status"], "no_media_found")
+            # retry_errors must NOT re-pick no_media_found — it's not transient.
+            self.assertEqual(
+                len(ctx.db.list_items_for_crawl(50, retry_errors=True)),
+                0,
+            )
+            # refresh crawl should still re-fetch it (post may have been updated).
+            self.assertEqual(
+                len(ctx.db.list_items_for_crawl(50, refresh=True)),
+                1,
+            )
+        finally:
+            ctx.db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

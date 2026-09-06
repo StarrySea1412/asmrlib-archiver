@@ -31,18 +31,10 @@ discovery:
   max_page_bytes: 5242880
 
 browser:
-  enabled: false
-  headless: true
-  javascript: false
-  wait_until: "domcontentloaded"
-  timeout_seconds: 30
-  block_resource_types:
-    - "image"
-    - "font"
-    - "media"
-    - "websocket"
-    - "eventsource"
   # 抓取阶段与桌面受控播放器共用的广告/追踪过滤词。
+  # （此块历史上还含 enabled/headless/javascript/wait_until/timeout_seconds/
+  #  block_resource_types 等 Playwright 时代字段，现在抓取走纯 HTTP，这些字段
+  #  已废弃删除，只保留 block_url_keywords。）
   block_url_keywords:
     - "doubleclick"
     - "googlesyndication"

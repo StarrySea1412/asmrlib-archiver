@@ -24,11 +24,16 @@ class ItemRepo(DbConnection):
         *,
         refresh: bool = False,
     ) -> list[sqlite3.Row]:
+        # no_media_found is a real content state, not a transient error — the
+        # post page parsed fine but simply carries no media references at all.
+        # Exclude it from retry_errors so the queue doesn't loop on posts that
+        # will never produce media until the site actually changes. A refresh
+        # crawl still re-fetches them in case the post was since updated.
         statuses = ["pending"]
         if retry_errors:
-            statuses.extend(["error", "blocked", "no_media_found"])
+            statuses.extend(["error", "blocked"])
         if refresh:
-            statuses.extend(["archived", "crawled"])
+            statuses.extend(["archived", "crawled", "no_media_found"])
         # Preserve order while de-duplicating when refresh + retry overlap.
         statuses = list(dict.fromkeys(statuses))
         placeholders = ",".join("?" for _ in statuses)

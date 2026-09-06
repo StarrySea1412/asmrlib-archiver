@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from urllib.parse import quote, urlencode, urlparse, urlunsplit
 
@@ -8,8 +7,6 @@ from .components import (
     action_btn,
     action_row,
     button,
-    chip,
-    chips,
     cover_card,
     cover_grid,
     crumb,
@@ -17,7 +14,6 @@ from .components import (
     detail_hero,
     detail_poster,
     empty_state,
-    live_pager,
     page_header,
     pill,
     pills,
@@ -323,150 +319,6 @@ class LivePages:
             "previous": prev_href,
         }
 
-    def _render_browse_legacy(self, query: dict[str, list[str]]) -> str:
-        """Live preview of https://asmrlib.com/ (and ?page=N). Read-only, no DB write."""
-        raw_url = (query.get("url") or [""])[0].strip()
-        try:
-            page_n = max(1, int((query.get("page") or ["1"])[0]))
-        except ValueError:
-            page_n = 1
-
-        try:
-            if raw_url:
-                page_url = self._assert_browse_url(raw_url)
-            else:
-                page_url = self._assert_browse_url(self._build_browse_url(page_n))
-        except ValueError as exc:
-            return self._page(
-                "站点预览",
-                [
-                    empty_state(
-                        "无法预览",
-                        _h(str(exc)),
-                        f"<p>{button('返回首页预览', href='/browse')}</p>",
-                        kicker="LIVE",
-                    )
-                ],
-            )
-
-        try:
-            parser, fetch_result = self._fetch_live(page_url)
-            parsed = parser.parse_site_page(page_url, fetch_result.text)
-        except Exception as exc:  # noqa: BLE001
-            return self._page(
-                "站点预览",
-                [
-                    empty_state(
-                        "抓取失败 · asmrlib 首页",
-                        f"{_h(type(exc).__name__)}: {_h(exc)}<br>"
-                        f"<code>{_h(page_url)}</code>",
-                        f"<p>{button('重试', href='/browse')}</p>",
-                        kicker="LIVE",
-                    )
-                ],
-            )
-
-        page_n = parsed.page_number or page_n
-        cards = self._browse_post_cards(parsed.posts)
-
-        # Auto-archive ONLY posts tagged with config.tag_seeds (e.g. yoonying).
-        # Homepage lists everything — do not seed unrelated authors/tags.
-        seed_tags = self._auto_archive_tag_slugs()
-        post_urls: list[str] = []
-        post_tag_map: dict[str, set[str]] = {}
-        for post in parsed.posts:
-            url = str(getattr(post, "source_url", "") or "")
-            if not url:
-                continue
-            post_urls.append(url)
-            tags = {
-                str(t).strip().lower()
-                for t in (getattr(post, "tags", None) or [])
-                if str(t).strip()
-            }
-            post_tag_map[url] = tags
-        sync_summary = self._enqueue_live_posts(
-            post_urls,
-            auto_crawl=True,
-            require_tags=seed_tags,
-            post_tags=post_tag_map,
-        )
-        sync_banner = self._sync_banner_html(sync_summary)
-
-        # Collect hot tags from this page for quick jump into /explore.
-        tag_counts: dict[str, int] = {}
-        for post in parsed.posts:
-            for tag in post.tags:
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        hot_tags = sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:16]
-
-        if parsed.prev_page_url:
-            prev_href = f"/browse?url={quote(parsed.prev_page_url, safe='')}#page-top"
-        elif page_n > 1:
-            prev_href = f"/browse?page={page_n - 1}#page-top"
-        else:
-            prev_href = None
-        if parsed.next_page_url:
-            next_href = f"/browse?url={quote(parsed.next_page_url, safe='')}#page-top"
-        else:
-            next_href = f"/browse?page={page_n + 1}#page-top"
-        jump_from = max(1, page_n - 4)
-        jump_to = page_n + 8
-        option_hrefs = [
-            (p, f"/browse?page={p}#page-top") for p in range(jump_from, jump_to + 1)
-        ]
-        pager = live_pager(
-            page=page_n,
-            prev_href=prev_href,
-            next_href=next_href,
-            option_hrefs=option_hrefs,
-        )
-
-        body = [
-            crumb(("收藏馆", "/"), ("发现", None)),
-            page_header(
-                "asmrlib 最新",
-                subtitle=(
-                    "代理首页预览 · 仅自动归档 config.tag_seeds 标签"
-                    "（当前如 yoonying）· 其它帖只读不入库"
-                ),
-                trailing=(
-                    f"{pill('本页', str(len(parsed.posts)))}"
-                    f"{pill('页码', str(page_n))}"
-                    + action_btn(
-                        "原站",
-                        variant="ghost",
-                        onclick=f"return openDesktopExternal({json.dumps(page_url)})",
-                        size="sm",
-                        icon="↗",
-                    )
-                ),
-            ),
-            sync_banner,
-        ]
-        if hot_tags:
-            body.append(
-                section_block(
-                    "本页标签",
-                    chips(
-                        chip(tag, href=f"/explore?tag={quote(tag)}", count=count)
-                        for tag, count in hot_tags
-                    ),
-                    trailing="<a class='text-link' href='/explore'>按标签浏览 →</a>",
-                )
-            )
-
-        body.append(
-            section_block(
-                "最新投稿",
-                [cards, pager],
-                trailing=(
-                    f"<span class='muted section-count'>{len(parsed.posts)}</span>"
-                ),
-            )
-        )
-        return self._page(f"站点预览 · 第 {page_n} 页", body)
-
     def _browse_post_cards(self, posts) -> str:
         cards: list[str] = []
         for index, post in enumerate(posts):
@@ -506,7 +358,7 @@ class LivePages:
         slug = self._query_value(query, "tag")
         raw_url = self._query_value(query, "url")
         if not slug and not raw_url:
-            return self._render_explore_legacy(query)
+            return self._render_explore_index(query)
         try:
             page_n = max(1, int(self._query_value(query, "page", "1")))
         except ValueError:
@@ -543,176 +395,43 @@ class LivePages:
             back_href="/explore",
         )
 
-    def _render_explore_legacy(self, query: dict[str, list[str]]) -> str:
-        slug = (query.get("tag") or [""])[0].strip()
-        raw_url = (query.get("url") or [""])[0].strip()
-        try:
-            page_n = max(1, int((query.get("page") or ["1"])[0]))
-        except ValueError:
-            page_n = 1
-
-        if not slug and not raw_url:
-            slugs = self._explore_tag_slugs()
-            body = [
-                crumb(("收藏馆", "/"), ("发现", "/browse"), ("按标签", None)),
-                page_header(
-                    "按标签发现",
-                    subtitle=(
-                        "自动归档只跟 config.tag_seeds 走（如 #yoonying）；"
-                        "其它标签可预览但不入库。"
-                    ),
-                    trailing=button("最新投稿", href="/browse", secondary=True, size="sm"),
-                ),
-                "<div class='explore-grid'>"
-                "<a class='explore-card explore-card-home' href='/browse'>"
-                "<span class='explore-kicker'>SITE</span>"
-                "<strong>asmrlib 首页</strong>"
-                "<span class='muted'>最新投稿 · 仅 seed 标签入库</span></a>",
-            ]
-            if slugs:
-                for s in slugs:
-                    body.append(
-                        f"<a class='explore-card' href='/explore?tag={quote(s)}'>"
-                        f"<span class='explore-kicker'>TAG</span>"
-                        f"<strong>#{_h(s)}</strong>"
-                        f"<span class='muted'>开始浏览</span></a>"
-                    )
-            body.append("</div>")
-            if not slugs:
-                body.append(
-                    empty_state(
-                        "还没有标签",
-                        "配置 <code>tag_seeds</code> 或先归档一些帖子，标签会自动出现。",
-                        f"<p>{button('去站点预览', href='/browse')}</p>",
-                        kicker="EXPLORE",
-                    )
-                )
-            return self._page("标签浏览", body)
-
-        try:
-            if raw_url:
-                page_url = self._assert_explore_url(raw_url)
-                slug = _tag_slug(page_url) or slug
-            else:
-                # Only allow known/allowed tag slugs (config or archived) —
-                # free-form tag input still goes through same-domain guard.
-                if not re.fullmatch(r"[A-Za-z0-9_\-\.%]+", slug):
-                    raise ValueError("invalid_tag_slug")
-                page_url = self._build_tag_page_url(slug, page_n)
-                page_url = self._assert_explore_url(page_url)
-        except ValueError as exc:
-            return self._page(
-                "标签浏览",
-                [
-                    empty_state(
-                        "无法浏览",
-                        _h(str(exc)),
-                        f"<p>{button('返回', href='/explore')}</p>",
-                        kicker="EXPLORE",
-                    )
-                ],
-            )
-
-        try:
-            parser, fetch_result = self._fetch_live(page_url)
-            parsed = parser.parse_tag_page(page_url, fetch_result.text)
-        except Exception as exc:  # noqa: BLE001
-            return self._page(
-                "标签浏览",
-                [
-                    empty_state(
-                        f"抓取失败 · #{slug or 'tag'}",
-                        f"{_h(type(exc).__name__)}: {_h(exc)}<br>"
-                        f"<code>{_h(page_url)}</code>",
-                        f"<p>{button('返回', href='/explore')}</p>",
-                        kicker="EXPLORE",
-                    )
-                ],
-            )
-
-        cards = self._explore_post_cards(parsed.post_urls)
-        # Tag page: auto-archive only when this slug is in tag_seeds.
-        seed_tags = self._auto_archive_tag_slugs()
-        slug_l = (slug or "").strip().lower()
-        if slug_l and slug_l in seed_tags:
-            # Whole page is that tag — every listed post matches.
-            post_urls = list(parsed.post_urls or [])
-            post_tag_map = {u: {slug_l} for u in post_urls}
-            sync_summary = self._enqueue_live_posts(
-                post_urls,
-                auto_crawl=True,
-                require_tags=seed_tags,
-                post_tags=post_tag_map,
-            )
-        else:
-            sync_summary = {
-                "added": 0,
-                "pending": 0,
-                "archived": 0,
-                "skipped_tag": len(parsed.post_urls or []),
-                "queued": 0,
-                "crawl_started": False,
-                "filter_tags": ",".join(sorted(seed_tags)),
-            }
-        sync_banner = self._sync_banner_html(sync_summary)
-        prev_href = (
-            f"/explore?tag={quote(slug)}&page={page_n - 1}#page-top"
-            if page_n > 1 and slug
-            else None
-        )
-        if parsed.next_page_url:
-            next_href = f"/explore?url={quote(parsed.next_page_url, safe='')}#page-top"
-        elif slug:
-            next_href = f"/explore?tag={quote(slug)}&page={page_n + 1}#page-top"
-        else:
-            next_href = f"/explore?page={page_n + 1}#page-top"
-        jump_from = max(1, page_n - 4)
-        jump_to = page_n + 8
-        option_hrefs = []
-        for p in range(jump_from, jump_to + 1):
-            if slug:
-                option_hrefs.append((p, f"/explore?tag={quote(slug)}&page={p}#page-top"))
-            else:
-                option_hrefs.append((p, f"/explore?page={p}#page-top"))
-        pager = live_pager(
-            page=page_n,
-            prev_href=prev_href,
-            next_href=next_href,
-            option_hrefs=option_hrefs,
-        )
-
+    def _render_explore_index(self, query: dict[str, list[str]]) -> str:
+        slugs = self._explore_tag_slugs()
         body = [
-            crumb(
-                ("收藏馆", "/"),
-                ("发现", "/browse"),
-                ("按标签", "/explore"),
-                (f"#{slug or 'tag'}", None),
-            ),
+            crumb(("收藏馆", "/"), ("发现", "/browse"), ("按标签", None)),
             page_header(
-                f"#{slug or 'tag'}",
+                "按标签发现",
                 subtitle=(
-                    f"本页 {len(parsed.post_urls)} 帖 · "
-                    + (
-                        "在 tag_seeds 内 · 自动归档"
-                        if (slug or "").strip().lower()
-                        in self._auto_archive_tag_slugs()
-                        else "不在 tag_seeds · 只读不入库"
-                    )
-                    + f" · <code>{_h(page_url)}</code>"
+                    "自动归档只跟 config.tag_seeds 走（如 #yoonying）；"
+                    "其它标签可预览但不入库。"
                 ),
-                trailing=button("全部标签", href="/explore", secondary=True, size="sm"),
+                trailing=button("最新投稿", href="/browse", secondary=True, size="sm"),
             ),
-            sync_banner,
-            section_block(
-                "投稿",
-                [cards, pager],
-                trailing=(
-                    f"<span class='muted section-count'>"
-                    f"{len(parsed.post_urls)}</span>"
-                ),
-            ),
+            "<div class='explore-grid'>"
+            "<a class='explore-card explore-card-home' href='/browse'>"
+            "<span class='explore-kicker'>SITE</span>"
+            "<strong>asmrlib 首页</strong>"
+            "<span class='muted'>最新投稿 · 仅 seed 标签入库</span></a>",
         ]
-        return self._page(f"#{slug or 'explore'}", body)
+        if slugs:
+            for s in slugs:
+                body.append(
+                    f"<a class='explore-card' href='/explore?tag={quote(s)}'>"
+                    f"<span class='explore-kicker'>TAG</span>"
+                    f"<strong>#{_h(s)}</strong>"
+                    f"<span class='muted'>开始浏览</span></a>"
+                )
+        body.append("</div>")
+        if not slugs:
+            body.append(
+                empty_state(
+                    "还没有标签",
+                    "配置 <code>tag_seeds</code> 或先归档一些帖子，标签会自动出现。",
+                    f"<p>{button('去站点预览', href='/browse')}</p>",
+                    kicker="EXPLORE",
+                )
+            )
+        return self._page("标签浏览", body)
 
     def _explore_post_cards(self, post_urls: list[str]) -> str:
         cards: list[str] = []
@@ -814,13 +533,13 @@ class LivePages:
 
         tags_html = ""
         if parsed.tags:
-            chips = ["<div class='chips detail-tags'>"]
+            tag_chips = ["<div class='chips detail-tags'>"]
             for tag in parsed.tags:
-                chips.append(
+                tag_chips.append(
                     f"<a class='chip' href='/explore?tag={quote(tag)}'>{_h(tag)}</a>"
                 )
-            chips.append("</div>")
-            tags_html = "".join(chips)
+            tag_chips.append("</div>")
+            tags_html = "".join(tag_chips)
 
         body = [
             crumb(("收藏馆", "/"), ("实时浏览", "/explore"), ("预览", None)),

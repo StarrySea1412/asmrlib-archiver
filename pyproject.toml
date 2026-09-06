@@ -36,6 +36,7 @@ ignore = ["E501"]  # line length 由 formatter 管
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 addopts = "-ra"
 
 [tool.coverage.run]

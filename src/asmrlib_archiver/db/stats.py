@@ -34,7 +34,7 @@ class StatsRepo(DbConnection):
             ),
             "items": (
                 "SELECT COUNT(*) FROM items "
-                "WHERE status IN ('pending', 'error', 'blocked', 'no_media_found')"
+                "WHERE status IN ('pending', 'error', 'blocked')"
             ),
             "media": (
                 "SELECT COUNT(*) FROM media_candidates "

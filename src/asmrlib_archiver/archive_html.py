@@ -63,12 +63,20 @@ def render_detail_archive(
     body.extend(_text_list("Tags", page.tags))
     body.extend(_text_list("Servers", page.servers))
 
+    # Static detail archives are written to <output>/html/<key>.html and served
+    # back through /file/html/<key>.html. Local media files live in <output>/videos/
+    # and are served through /file/videos/<name>. A bare relative src like
+    # "videos/x.mp4" would resolve against the document's directory
+    # (/file/html/...) to /file/html/videos/x.mp4, which 404s. To point at the
+    # real /file/videos/x.mp4 the src must climb one level: "../videos/x.mp4".
+    # _normalize_local_media_src below keeps the CSP safety invariant "src must
+    # stay inside the archive root" by checking the resolved path can't escape.
     playable = [item for item in (local_media or []) if item.get("src")]
     if playable:
         body.extend(["<section>", "<h2>Local media</h2>"])
         for item in playable:
             label = item.get("label") or item.get("kind") or "media"
-            src = item["src"]
+            src = _normalize_local_media_src(item["src"])
             kind = (item.get("kind") or "").lower()
             tag = "audio" if kind.startswith("audio") or src.lower().endswith(
                 (".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg")
@@ -166,7 +174,14 @@ def is_safe_archive_html(html: str) -> bool:
 
 
 def _is_allowed_local_media_attr(node: Tag, name: str, raw_value: object) -> bool:
-    """Allow only relative local media sources on video/audio players."""
+    """Allow only relative local media sources on video/audio players.
+
+    Archives are served at /file/html/<key>.html and media at /file/videos/<x>,
+    so a playable src is "../videos/<x>" (climb one dir from html/ to root,
+    then into videos/). The safety invariant is "resolves inside the archive
+    root": a single leading "../" to reach the root is fine; any deeper
+    traversal, a scheme/blob/data, an absolute path, or a drive letter is not.
+    """
     if name != "src" or node.name not in {"video", "audio"}:
         return False
     if isinstance(raw_value, list):
@@ -180,11 +195,38 @@ def _is_allowed_local_media_attr(node: Tag, name: str, raw_value: object) -> boo
     lowered = value.lower()
     if lowered.startswith(("http:", "https:", "//", "data:", "blob:", "javascript:")):
         return False
-    if "\\" in value or ".." in value.split("/"):
+    if "\\" in value:
         return False
-    if value.startswith("/") or ":" in value.split("/", 1)[0]:
+    segments = value.split("/")
+    # Permit exactly one leading ".." (html/<key>.html -> ../videos/<x>). Any
+    # further ".." could escape the archive root.
+    if ".." in segments[1:]:
+        return False
+    if value.startswith("/") or ":" in segments[0]:
         return False
     return True
+
+
+def _normalize_local_media_src(src: str) -> str:
+    """Rewrite a root-relative media path into a document-relative one.
+
+    ``_local_media_for_render`` returns paths like ``videos/<name>`` (relative
+    to the archive root). The detail archive lives one directory deeper, at
+    ``html/<key>.html`` served through ``/file/html/<key>.html``, so a bare
+    ``videos/<name>`` resolves to ``/file/html/videos/<name>`` and 404s. Prefix
+    ``../`` to climb back to the root: ``../videos/<name>`` resolves to
+    ``/file/videos/<name>``. Idempotent — if the caller already prefixed
+    ``../`` we don't double it.
+    """
+    if not src:
+        return src
+    if src.startswith("../"):
+        return src
+    if src.startswith("/"):
+        # Absolute path against root: turn into a same-document-ish climb.
+        # ``/videos/x`` -> ``../videos/x`` (one level up from html/).
+        return "../" + src.lstrip("/")
+    return "../" + src
 
 
 def is_safe(html: str) -> bool:

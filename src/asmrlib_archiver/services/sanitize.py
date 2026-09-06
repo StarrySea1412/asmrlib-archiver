@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from ..archive_html import is_safe_archive_html, render_detail_archive, render_tag_archive
 from ..models import ParsedPage
 from .base import ServiceBase
+
+logger = logging.getLogger(__name__)
 
 
 class SanitizeService(ServiceBase):
@@ -38,6 +41,9 @@ class SanitizeService(ServiceBase):
                 self._save_parse_result(parsed)
                 sanitized += 1
             except Exception:
+                logger.exception(
+                    "sanitize failure (unexpected) url=%s", row["source_url"]
+                )
                 failed += 1
 
         for row in self.ctx.db.list_tag_pages():
@@ -58,6 +64,9 @@ class SanitizeService(ServiceBase):
                 self.ctx.storage.write_text(html_path, archive_html)
                 sanitized += 1
             except Exception:
+                logger.exception(
+                    "sanitize failure (unexpected) url=%s", row["page_url"]
+                )
                 failed += 1
 
         safe_stub = render_detail_archive(
