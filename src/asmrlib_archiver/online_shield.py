@@ -663,19 +663,32 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
     document.querySelectorAll('.jw-icon-display,.jw-display-icon-container,.vjs-big-play-button,.plyr__control--overlaid,#player-button-container,#player-button,button[aria-label*="play" i],[class*="bigPlay" i],[class*="play-btn" i],[class*="play_icon" i]').forEach((button) => {
       try { button.click(); acted = true; } catch (_) {}
     });
-    // Custom SPA players render unknown controls. Tap the video centre like
-    // a user would: the overlay button at that point (if any) gets the
-    // click. Stops once playback is observed so manual pause stays intact.
-    if (!state.sawPlaying && state.mediaClicks <= 12) {
-      document.querySelectorAll('video').forEach((video) => {
-        if (state.sawPlaying || video.paused === false || video.ended) return;
+    // Custom SPA players render unknown controls and often show a
+    // click-to-play overlay *before* any <video> exists. Tap the centre of
+    // the largest visible player stage (video / canvas / [class*=player])
+    // like a user would; the overlay at that point receives the click.
+    // Stops once playback is observed so manual pause stays intact.
+    if (!state.sawPlaying && state.mediaClicks <= 15) {
+      const stages = Array.from(
+        document.querySelectorAll('video, canvas, [class*="player" i]')
+      ).filter((el) => {
         try {
-          const rect = video.getBoundingClientRect();
-          if (rect.width < 60 || rect.height < 60) return;
+          const r = el.getBoundingClientRect();
+          return r.width >= 140 && r.height >= 90;
+        } catch (_) { return false; }
+      }).sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return (rb.width * rb.height) - (ra.width * ra.height);
+      });
+      const stage = stages[0];
+      if (stage) {
+        try {
+          const rect = stage.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
           const hit = document.elementFromPoint(cx, cy);
-          const target = (hit && hit.closest && hit.closest('button,[role="button"]')) || hit || video;
+          const target = (hit && hit.closest && hit.closest('button,[role="button"],video,[class*="play" i]')) || hit || stage;
           const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
           try { target.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (_) {}
           target.dispatchEvent(new MouseEvent('mousedown', opts));
@@ -685,7 +698,7 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
           state.mediaClicks += 1;
           acted = true;
         } catch (_) {}
-      });
+      }
     }
     return acted;
   };

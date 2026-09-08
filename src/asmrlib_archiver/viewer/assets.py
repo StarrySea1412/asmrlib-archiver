@@ -234,6 +234,29 @@ function openDesktopOnline(url) {
   if (!/^https?:\/\//i.test(target)) return false;
   // The desktop bridge owns the controlled player. It is responsible for
   // popup/ad interception and must receive the exact approved URL.
+  try {
+    if (window.pywebview && window.pywebview.api &&
+        typeof window.pywebview.api.open_online_player === 'function') {
+      // Resolving the bare player URL takes a few seconds — keep visible
+      // feedback up for the whole jump instead of a dead click.
+      if (window.__asmrlibLoading) {
+        window.__asmrlibLoading('正在解析播放地址并打开安全播放器…', { soft: true });
+      }
+      var ret = window.pywebview.api.open_online_player(target);
+      var settle = function (result) {
+        if (window.__asmrlibLoadingDone) window.__asmrlibLoadingDone();
+        if (result && result.ok === false && window.__asmrlibToast) {
+          window.__asmrlibToast(result.error || '操作失败');
+        }
+      };
+      if (ret && typeof ret.then === 'function') {
+        ret.then(settle).catch(function () {
+          if (window.__asmrlibLoadingDone) window.__asmrlibLoadingDone();
+        });
+      } else settle(ret);
+      return false;
+    }
+  } catch (e) {}
   if (_callDesktop('open_online_player', target)) return false;
   // ``serve`` mode has no controlled browser. Keep the click useful by
   // falling back to the same system-browser hand-off as the original link.
