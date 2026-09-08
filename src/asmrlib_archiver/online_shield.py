@@ -349,6 +349,7 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
   const policy = __POLICY_JSON__;
   const state = window.__asmrlibShieldState = {
     server: '', captcha: false, userSound: false, lastPlay: 0,
+    sawPlaying: false, mediaClicks: 0,
   };
   const hostOf = (value) => {
     try { return new URL(String(value || ''), location.href).hostname.toLowerCase().replace(/\.$/, ''); }
@@ -659,11 +660,38 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
         acted = true;
       } catch (_) {}
     });
-    document.querySelectorAll('.jw-icon-display,.jw-display-icon-container,.vjs-big-play-button,.plyr__control--overlaid,#player-button-container,#player-button,button[aria-label*="play" i]').forEach((button) => {
+    document.querySelectorAll('.jw-icon-display,.jw-display-icon-container,.vjs-big-play-button,.plyr__control--overlaid,#player-button-container,#player-button,button[aria-label*="play" i],[class*="bigPlay" i],[class*="play-btn" i],[class*="play_icon" i]').forEach((button) => {
       try { button.click(); acted = true; } catch (_) {}
     });
+    // Custom SPA players render unknown controls. Tap the video centre like
+    // a user would: the overlay button at that point (if any) gets the
+    // click. Stops once playback is observed so manual pause stays intact.
+    if (!state.sawPlaying && state.mediaClicks <= 12) {
+      document.querySelectorAll('video').forEach((video) => {
+        if (state.sawPlaying || video.paused === false || video.ended) return;
+        try {
+          const rect = video.getBoundingClientRect();
+          if (rect.width < 60 || rect.height < 60) return;
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const hit = document.elementFromPoint(cx, cy);
+          const target = (hit && hit.closest && hit.closest('button,[role="button"]')) || hit || video;
+          const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+          try { target.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (_) {}
+          target.dispatchEvent(new MouseEvent('mousedown', opts));
+          try { target.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (_) {}
+          target.dispatchEvent(new MouseEvent('mouseup', opts));
+          target.dispatchEvent(new MouseEvent('click', opts));
+          state.mediaClicks += 1;
+          acted = true;
+        } catch (_) {}
+      });
+    }
     return acted;
   };
+  document.addEventListener('playing', (event) => {
+    if (event.target && /^VIDEO$/i.test(event.target.tagName)) state.sawPlaying = true;
+  }, true);
   document.addEventListener('volumechange', (event) => {
     if (event.target && /^(VIDEO|AUDIO)$/.test(event.target.tagName)) state.userSound = true;
   }, true);
