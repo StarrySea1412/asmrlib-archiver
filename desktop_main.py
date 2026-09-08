@@ -222,6 +222,12 @@ class DesktopApi:
     def open_online_player(self, url: str) -> dict:
         """Open an allow-listed player in the guarded WebView2 window.
 
+        Post pages on the site domain are first resolved to their bare
+        player embed URL so the sandbox window shows a pure video page —
+        no site header, related grid or ad iframes. Resolution is
+        best-effort: if it fails the original page loads under the shield,
+        which still strips ads/popups.
+
         The WebView2 integration is optional at runtime. If it cannot be
         initialized (for example in plain ``serve`` mode or on a machine
         without WebView2), the exact validated URL is handed to the system
@@ -233,6 +239,20 @@ class DesktopApi:
         except Exception as exc:
             code = str(getattr(exc, "code", "invalid_url"))
             return {"ok": False, "code": code, "error": str(exc)}
+
+        # Sandboxed pure-video mode: swap a post page for its player embed.
+        resolved_note = ""
+        if self._is_post_page(target):
+            try:
+                from asmrlib_archiver.player_resolver import resolve_player_url
+
+                resolved = resolve_player_url(target)
+                validated = self._external_policy.validate(resolved.player_url)
+                target = validated
+                resolved_note = "sandboxed-player"
+            except Exception:
+                # Fall back to loading the post page under the shield.
+                pass
 
         try:
             from asmrlib_archiver.online_shield import GuardedWebViewPlayer
@@ -246,6 +266,8 @@ class DesktopApi:
                     )
                 result = self._online_shield.open(target)
             if result.get("ok"):
+                if resolved_note:
+                    result["mode"] = resolved_note
                 return result
         except Exception as exc:
             result = {
@@ -266,6 +288,21 @@ class DesktopApi:
                 }
             )
         return fallback
+
+    @staticmethod
+    def _is_post_page(url: str) -> bool:
+        """True for site post/tag pages that wrap (not are) a player."""
+
+        try:
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return False
+        if host != "asmrlib.com" and not host.endswith(".asmrlib.com"):
+            return False
+        path = urlsplit(url).path or "/"
+        return path.startswith("/posts/") or path.startswith("/tags/") or path == "/"
 
     def _close_online_player(self) -> None:
         with self._lock:
