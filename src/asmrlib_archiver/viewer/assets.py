@@ -2032,4 +2032,15 @@ body {
   .cinema-live-skeleton .live-skeleton-card { animation: none; }
 }
 """
+
+# Live-feed pager (上一页 / 下一页) under injected feed content.
+_CSS += """
+.live-feed-pager {
+  display: flex; justify-content: center; align-items: center;
+  gap: 12px; margin-top: 18px;
+}
+.live-feed-pager .button { min-width: 108px; }
+"""
+
 _CSS += _CINEMA_CSS
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import quote, urlencode, urlparse, urlunsplit
 
@@ -551,11 +552,13 @@ class LivePages:
                 meta_html=pills(meta_bits),
                 actions_html=action_row(
                     [
+                        # Direct sandboxed play: the desktop bridge resolves
+                        # the post page to its bare player URL, so no
+                        # landing-page hop is needed.
                         action_btn(
-                            "浏览器打开",
+                            "安全播放",
                             variant="online",
-                            href=f"/watch?url={quote(source_url, safe='')}",
-                            target_blank=True,
+                            onclick=f"return openDesktopOnline({json.dumps(source_url)})",
                         )
                     ],
                     hero=True,
@@ -569,8 +572,8 @@ class LivePages:
                 trailing=status_chip("未归档"),
                 extra_class="action-panel",
                 hint=(
-                    "浏览器打开会在系统默认浏览器中查看。"
-                    "想归档请把 URL 加入 seeds 后跑 <code>crawl</code>。"
+                    "桌面版“安全播放”会解析出裸播放器页并在受控窗口中打开"
+                    "（只显示视频，拦截广告/弹窗）。"
                 ),
             ),
         ]
@@ -589,11 +592,10 @@ class LivePages:
                     "</div>"
                     "<div class='ref-card-actions'>"
                     + action_btn(
-                        "浏览器打开",
+                        "安全播放",
                         variant="online",
                         small=True,
-                        href=f"/watch?url={quote(media.media_url, safe='')}",
-                        target_blank=True,
+                        onclick=f"return openDesktopOnline({json.dumps(media.media_url)})",
                         icon="",
                     )
                     + "</div></article>"

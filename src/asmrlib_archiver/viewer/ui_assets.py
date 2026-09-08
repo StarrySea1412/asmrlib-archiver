@@ -84,6 +84,44 @@ _APP_JS_EXTRA = r"""
     else section.setAttribute('aria-hidden', 'true');
   }
 
+  function goFeed(host, endpoint) {
+    if (endpoint) host.setAttribute('data-live-feed', endpoint);
+    loadFeed(host);
+    var top = host.closest('.section-block') || host;
+    if (top && top.scrollIntoView) {
+      try { top.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
+    }
+  }
+
+  function renderFeedPager(host, payload) {
+    var existing = host.querySelector('.live-feed-pager');
+    if (existing) existing.remove();
+    var nextLink = payload && payload.next ? String(payload.next) : '';
+    var prevLink = payload && payload.previous ? String(payload.previous) : '';
+    if (!nextLink && !prevLink) return;
+    var pager = document.createElement('div');
+    pager.className = 'live-feed-pager';
+    if (prevLink) {
+      var prev = document.createElement('button');
+      prev.type = 'button';
+      prev.className = 'button button-secondary';
+      prev.textContent = '‹ 上一页';
+      prev.addEventListener('click', function () { goFeed(host, prevLink); });
+      pager.appendChild(prev);
+    }
+    if (nextLink) {
+      var next = document.createElement('button');
+      next.type = 'button';
+      next.className = 'button';
+      next.textContent = '下一页 ›';
+      next.addEventListener('click', function () { goFeed(host, nextLink); });
+      pager.appendChild(next);
+    }
+    var content = host.querySelector('[data-live-feed-content]');
+    if (content && content.parentElement) content.parentElement.appendChild(pager);
+    else host.appendChild(pager);
+  }
+
   function loadFeed(host) {
     var endpoint = host.getAttribute('data-live-feed') || '/api/live-feed';
     var target = host.querySelector('[data-live-feed-content]') || host;
@@ -111,6 +149,7 @@ _APP_JS_EXTRA = r"""
         }
         target.removeAttribute('aria-busy');
         setFeedVisibility(host, true);
+        renderFeedPager(host, payload);
         if (window.__asmrlibCinemaInit) window.__asmrlibCinemaInit();
       })
       .catch(function () {

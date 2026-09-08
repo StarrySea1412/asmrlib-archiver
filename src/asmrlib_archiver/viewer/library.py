@@ -262,23 +262,23 @@ class LibraryPages:
                 )
 
         # Live discovery is deliberately a non-blocking shell.  The shared
-        # app script fills this rail from /api/live-feed after the local HTML
+        # app script fills this grid from /api/live-feed after the local HTML
         # has painted; an empty successful response removes the section.
+        # Grid, not rail: horizontal scrollbars cramped the home layout.
         endpoint_builder = getattr(self, "_live_feed_endpoint", None)
         live_endpoint = (
-            endpoint_builder(scope="home", page=1, limit=12)
+            endpoint_builder(scope="home", page=1, limit=8)
             if callable(endpoint_builder)
-            else "/api/live-feed?scope=home&page=1&limit=12"
+            else "/api/live-feed?scope=home&page=1&limit=8"
         )
         body.append(
             section_block(
                 "站点最新",
                 (
-                    f"<div class='live-feed cinema-live-feed' data-live-feed='{_h(live_endpoint)}' "
-                    "data-live-feed-mode='rail'>"
+                    f"<div class='live-feed' data-live-feed='{_h(live_endpoint)}'>"
                     "<div data-live-feed-content aria-live='polite' aria-busy='true'>"
-                    "<div class='cinema-live-skeleton' aria-hidden='true'>"
-                    + "<span class='live-skeleton-card'></span>" * 6
+                    "<div class='live-skeleton-grid' aria-hidden='true'>"
+                    + "<span class='live-skeleton-card'></span>" * 8
                     + "</div></div>"
                     "<button type='button' class='button button-secondary live-feed-retry' "
                     "data-live-feed-retry hidden>重试</button></div>"
