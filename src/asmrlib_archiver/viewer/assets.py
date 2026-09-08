@@ -1822,15 +1822,11 @@ body {
   outline-offset: 3px;
 }
 
-/* A thin, non-blocking progress line replaces the old full-screen veil. */
-.nav-loading { inset: 0 0 auto 0; height: 3px; align-items: flex-start;
-  background: transparent; pointer-events: none; backdrop-filter: none; }
-.nav-loading.is-on { display: block; opacity: 1; visibility: visible;
-  pointer-events: none; backdrop-filter: none;
-  animation: cinema-progress-reveal 0s linear .18s both; }
-.nav-loading-panel { display: none; }
+/* Click feedback on navigation: the top progress line stays, and the
+   dimmed backdrop with the centered spinner panel is restored — clicking a
+   link must feel like something happened, not just a thin bar. */
+.nav-loading.is-on { backdrop-filter: blur(3px); }
 .nav-loading-bar { height: 3px; box-shadow: 0 0 14px rgba(136,168,255,.55); }
-@keyframes cinema-progress-reveal { from { opacity: 0; } to { opacity: 1; } }
 
 /* Sections are bands; only repeated items are framed cards. */
 .section-block {
