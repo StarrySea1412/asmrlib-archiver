@@ -39,7 +39,7 @@ class SafeHttpClient:
         target = self.guard.assert_page_allowed(url)
         attempts = self.crawler.retries + 1
         last_error: Exception | None = None
-        for _attempt in range(attempts):
+        for attempt in range(attempts):
             try:
                 return self._get_with_redirect_guard(
                     target,
@@ -49,6 +49,11 @@ class SafeHttpClient:
                 )
             except (httpx.HTTPError, BlockedRedirect) as exc:
                 last_error = exc
+                if attempt + 1 < attempts:
+                    # Cloudflare-style resets come in short bursts; a pause
+                    # between attempts actually clears them, a tight loop
+                    # just burns all retries inside the same window.
+                    time.sleep(1.5 * (attempt + 1))
         raise RuntimeError(f"fetch_failed: {last_error}")
 
     def _get_with_redirect_guard(

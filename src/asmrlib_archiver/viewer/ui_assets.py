@@ -167,40 +167,43 @@ _APP_JS_EXTRA = r"""
     var target = host.querySelector('[data-live-feed-content]') || host;
     clearFeedExtras(host);
     feedLoading(target);
-    // One silent retry rides out transient connection resets before the
-    // user is asked to care.
-    fetch(endpoint, {headers: {'Accept': 'application/json'}})
-      .catch(function () {
-        return new Promise(function (resolve) {
-          setTimeout(function () { resolve(fetch(endpoint, {headers: {'Accept': 'application/json'}})); }, 900);
-        });
-      })
-      .then(function (response) {
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        return response.json();
-      })
-      .then(function (payload) {
-        if (!payload || !payload.ok) throw new Error((payload && payload.error) || 'feed unavailable');
-        if (!payload.html) {
-          target.innerHTML = '';
+    // Remote hiccups come in bursts: retry silently with growing delays
+    // (total ~4s) while the loading state stays up. Only after every
+    // attempt failed does the error panel appear.
+    var delaysMs = [0, 900, 3200];
+    function attempt(index) {
+      fetch(endpoint, {headers: {'Accept': 'application/json'}})
+        .then(function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          return response.json();
+        })
+        .then(function (payload) {
+          if (!payload || !payload.ok) throw new Error((payload && payload.error) || 'feed unavailable');
+          if (!payload.html) {
+            target.innerHTML = '';
+            target.removeAttribute('aria-busy');
+            setFeedVisibility(host, false);
+            return;
+          }
+          target.innerHTML = payload.html || '';
+          if ((host.getAttribute('data-live-feed-mode') || '') === 'rail') {
+            wrapRail(target, '站点最新');
+          }
           target.removeAttribute('aria-busy');
-          setFeedVisibility(host, false);
-          return;
-        }
-        target.innerHTML = payload.html || '';
-        if ((host.getAttribute('data-live-feed-mode') || '') === 'rail') {
-          wrapRail(target, '站点最新');
-        }
-        target.removeAttribute('aria-busy');
-        setFeedVisibility(host, true);
-        renderFeedPager(host, payload);
-        if (window.__asmrlibCinemaInit) window.__asmrlibCinemaInit();
-      })
-      .catch(function () {
-        setFeedVisibility(host, true);
-        clearFeedExtras(host);
-        feedError(target, host);
-      });
+          setFeedVisibility(host, true);
+          renderFeedPager(host, payload);
+          if (window.__asmrlibCinemaInit) window.__asmrlibCinemaInit();
+        })
+        .catch(function () {
+          if (index + 1 < delaysMs.length) {
+            setTimeout(function () { attempt(index + 1); }, delaysMs[index + 1]);
+            return;
+          }
+          setFeedVisibility(host, true);
+          feedError(target, host);
+        });
+    }
+    attempt(0);
   }
 
   function initFeeds() {

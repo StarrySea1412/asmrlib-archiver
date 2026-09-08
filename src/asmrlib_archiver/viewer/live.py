@@ -281,13 +281,18 @@ class LivePages:
                     require_tags=seed_tags,
                     post_tags=post_tag_map,
                 )
-                next_href = (
-                    f"/browse?url={quote(parsed.next_page_url, safe='')}"
-                    if parsed.next_page_url
-                    else f"/browse?page={current_page + 1}"
+                # The pager fetches these as API endpoints; returning page
+                # URLs here made the frontend parse HTML as JSON and show
+                # the error panel right after a successful load.
+                next_href = self._live_feed_endpoint(
+                    scope="browse",
+                    page=current_page + 1,
+                    raw_url=parsed.next_page_url or "",
                 )
                 prev_href = (
-                    f"/browse?page={current_page - 1}" if current_page > 1 else ""
+                    self._live_feed_endpoint(scope="browse", page=current_page - 1)
+                    if current_page > 1
+                    else ""
                 )
             elif scope == "tag":
                 if raw_url:
@@ -313,13 +318,16 @@ class LivePages:
                         require_tags=seed_tags,
                         post_tags={url: {slug_l} for url in post_urls},
                     )
-                next_href = (
-                    f"/explore?url={quote(parsed.next_page_url, safe='')}"
-                    if parsed.next_page_url
-                    else f"/explore?tag={quote(slug)}&page={current_page + 1}"
+                next_href = self._live_feed_endpoint(
+                    scope="tag",
+                    page=current_page + 1,
+                    raw_url=parsed.next_page_url or "",
+                    tag=slug,
                 )
                 prev_href = (
-                    f"/explore?tag={quote(slug)}&page={current_page - 1}"
+                    self._live_feed_endpoint(
+                        scope="tag", page=current_page - 1, tag=slug
+                    )
                     if current_page > 1
                     else ""
                 )
