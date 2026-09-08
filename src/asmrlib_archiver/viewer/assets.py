@@ -368,8 +368,31 @@ _CINEMA_JS = r"""
 (function () {
   'use strict';
 
+  function photonOriginUrl(raw) {
+    // WordPress Photon proxies (i0/i1/i2.wp.com) randomly 404 images that
+    // still exist on their origin host. The site's own <img onerror> swaps
+    // the proxy URL for the direct origin URL; mirror that behaviour.
+    try {
+      var url = new URL(String(raw || ''), location.href);
+      if (/^i\d+\.wp\.com$/.test(url.hostname)) {
+        var rest = url.pathname.replace(/^\/+/, '');
+        if (!rest) return '';
+        return url.protocol + '//' + rest + (url.search || '');
+      }
+    } catch (e) {}
+    return '';
+  }
+
   function showCoverFallback(img) {
     if (!img || img.dataset.coverFailed === '1') return;
+    if (img.dataset.coverOriginTried !== '1') {
+      var origin = photonOriginUrl(img.currentSrc || img.getAttribute('src') || '');
+      if (origin && origin !== img.src) {
+        img.dataset.coverOriginTried = '1';
+        img.src = origin;
+        return;
+      }
+    }
     img.dataset.coverFailed = '1';
     img.setAttribute('aria-hidden', 'true');
     img.hidden = true;

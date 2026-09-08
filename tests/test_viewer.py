@@ -125,6 +125,19 @@ class ViewerTests(unittest.TestCase):
         self.assertNotIn("openDesktopOnlineMini", APP_JS)
         self.assertNotIn("recordDesktopOnline", APP_JS)
 
+    def test_cover_fallback_retries_photon_origin_before_plate(self) -> None:
+        from asmrlib_archiver.viewer.ui_assets import APP_JS
+
+        # Photon proxy misses must retry the origin URL once; the letter
+        # plate only shows when the origin also fails.
+        self.assertIn("photonOriginUrl", APP_JS)
+        self.assertIn("coverOriginTried", APP_JS)
+        self.assertLess(
+            APP_JS.index("photonOriginUrl"),
+            APP_JS.index("dataset.coverFailed = '1'"),
+            "origin retry must run before the fallback plate is revealed",
+        )
+
     def test_home_and_detail_render_cover_image(self) -> None:
         import inspect
 
