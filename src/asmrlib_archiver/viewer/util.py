@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import html
-import mimetypes
 import os
 import re
 import sys
 import time
 from pathlib import Path
 from urllib.parse import unquote
+
 
 def _player_tag(suffix: str, src: str, *, autoplay: bool = False) -> str:
     audio_ext = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}

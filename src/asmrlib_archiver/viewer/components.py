@@ -11,7 +11,6 @@ from urllib.parse import quote
 
 from .util import _h
 
-
 # --------------------------------------------------------------------------- crumbs
 
 def crumb(*parts: tuple[str, str | None]) -> str:

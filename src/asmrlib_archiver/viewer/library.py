@@ -12,9 +12,9 @@ from .components import (
     chip,
     chips,
     cinema_hero,
-    cover_rail,
     cover_card,
     cover_grid,
+    cover_rail,
     crumb,
     detail_backdrop,
     detail_hero,
@@ -22,11 +22,13 @@ from .components import (
     empty_state,
     meta_strip,
     page_header,
-    pagination as pagination_html,
     pill,
     pills,
     section_block,
     status_chip,
+)
+from .components import (
+    pagination as pagination_html,
 )
 from .preview import VIDEO_PREVIEW_EXTS
 from .util import (
@@ -348,9 +350,9 @@ class LibraryPages:
                 " · ".join(title_bits),
                 subtitle=f"共 {total} 条 · 本地收藏库",
                 trailing=(
-                    f"<a class='text-link' href='/author'>作者</a>"
-                    f"<span class='muted'> · </span>"
-                    f"<a class='text-link' href='/explore'>标签发现</a>"
+                    "<a class='text-link' href='/author'>作者</a>"
+                    "<span class='muted'> · </span>"
+                    "<a class='text-link' href='/explore'>标签发现</a>"
                 ),
             ),
             self._search_form(q, tag),
@@ -413,12 +415,10 @@ class LibraryPages:
                 ],
             )
         media_rows = self.db.list_media_for_item(source_url)
-        tag_rows = [
-            item for item in self.db.conn.execute(
+        tag_rows = list(self.db.conn.execute(
                 "SELECT tag_url FROM tag_items WHERE source_url = ? ORDER BY tag_url",
                 (source_url,),
-            )
-        ]
+            ))
         title = row["title"] or source_url
 
         cover_url = str(row["cover"] or "")

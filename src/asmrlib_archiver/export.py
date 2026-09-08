@@ -11,7 +11,6 @@ from .db import ArchiveDb
 from .models import utc_now
 from .storage import Storage, safe_filename
 
-
 SUPPORTED_FORMATS = ("json", "csv", "markdown")
 
 

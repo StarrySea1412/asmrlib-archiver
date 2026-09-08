@@ -12,16 +12,14 @@ from asmrlib_archiver.cli import build_parser, main
 from asmrlib_archiver.config import load_config
 from asmrlib_archiver.crawler import Archiver
 
-
 TAG_URL = "https://asmrlib.com/tags/yoonying"
 
 
 class CliTests(unittest.TestCase):
     def test_open_player_command_is_removed(self) -> None:
         parser = build_parser()
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                parser.parse_args(["open-player", "https://asmrlib.com/posts/example"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["open-player", "https://asmrlib.com/posts/example"])
 
     def test_limits_must_be_positive(self) -> None:
         parser = build_parser()
@@ -30,9 +28,8 @@ class CliTests(unittest.TestCase):
             ["crawl", "--limit", "-1"],
             ["run", "--page-limit", "0"],
         ]:
-            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    parser.parse_args(argv)
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(argv)
 
     def test_historical_blocked_tag_makes_discover_and_run_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

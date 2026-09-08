@@ -8,7 +8,6 @@ from pathlib import Path
 from .db import ArchiveDb
 from .storage import Storage, safe_filename
 
-
 MEDIA_EXTENSIONS = {
     ".mp4",
     ".m4v",
@@ -65,10 +64,9 @@ class LocalMediaImporter:
         if copy:
             digest_name = safe_filename(path.stem) or "media"
             target = self.storage.video_dir / f"{digest_name}_{path.stat().st_size}{path.suffix.lower()}"
-            if target.resolve() != path:
-                if not target.exists() or target.stat().st_size != path.stat().st_size:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, target)
+            if target.resolve() != path and (not target.exists() or target.stat().st_size != path.stat().st_size):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
             stored = target.resolve()
             copied = True
         else:

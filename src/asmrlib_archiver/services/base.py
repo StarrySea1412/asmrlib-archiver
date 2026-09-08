@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from ..archive_html import is_safe_archive_html, render_detail_archive
-from ..guards import BlockedUrl
 from ..models import MediaCandidate, ParsedPage
 
 if TYPE_CHECKING:
@@ -22,12 +22,12 @@ if TYPE_CHECKING:
 class ArchiverContext:
     """各 service 共享的依赖 bundle，避免每个 service 接 7 个参数。"""
 
-    config: "AppConfig"
-    db: "ArchiveDb"
-    guard: "UrlGuard"
-    parser: "AsmrlibParser"
-    robots: "RobotsPolicy"
-    storage: "Storage"
+    config: AppConfig
+    db: ArchiveDb
+    guard: UrlGuard
+    parser: AsmrlibParser
+    robots: RobotsPolicy
+    storage: Storage
     report: Callable[[str], None] | None
 
 

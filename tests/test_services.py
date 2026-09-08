@@ -150,9 +150,9 @@ class ServiceStandaloneTests(unittest.TestCase):
                     return FetchResult(
                         url=url,
                         content=(
-                            "<main><h1>Text only</h1>"
-                            '<a href="/tags/yoonying">yoonying</a></main>'
-                        ).encode("utf-8"),
+                            b"<main><h1>Text only</h1>"
+                            b'<a href="/tags/yoonying">yoonying</a></main>'
+                        ),
                         content_type="text/html",
                         history=[],
                     )

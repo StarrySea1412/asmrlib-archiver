@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable
+from collections.abc import Iterable
 
 from ..models import utc_now
 from .base import DbConnection, TagPageCompletion

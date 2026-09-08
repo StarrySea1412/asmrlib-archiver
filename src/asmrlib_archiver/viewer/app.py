@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import mimetypes
 import shutil
@@ -196,10 +197,8 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                 self._sync_state["phase"] = "done"
             finally:
                 self._sync_state["running"] = False
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._sync_lock.release()
-                except RuntimeError:
-                    pass
 
         threading.Thread(
             target=worker, daemon=True, name="viewer-live-crawl"
@@ -297,10 +296,8 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                 self._sync_state["phase"] = "done"
             finally:
                 self._sync_state["running"] = False
-                try:
+                with contextlib.suppress(RuntimeError):
                     self._sync_lock.release()
-                except RuntimeError:
-                    pass
 
         threading.Thread(
             target=worker, daemon=True, name=f"viewer-tag-sync-{reason}"

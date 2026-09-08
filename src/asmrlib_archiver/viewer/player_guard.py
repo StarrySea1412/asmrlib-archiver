@@ -11,6 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from ..security_lists import (
     BLOCKED_HOSTS as DEFAULT_BLOCKED_HOSTS,
+)
+from ..security_lists import (
     PLAYER_DOMAINS as DEFAULT_PLAYER_DOMAINS,
 )
 

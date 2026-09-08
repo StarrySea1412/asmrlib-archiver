@@ -40,9 +40,8 @@ class SecurityListSingleSourceTests(unittest.TestCase):
         """
         policy = player_guard.ExternalUrlPolicy()
         for host in ("bit.ly", "goo.gl", "t.co", "tinyurl.com", "amazon-adsystem.com"):
-            with self.subTest(host=host):
-                with self.assertRaises(player_guard.PlayerUrlError):
-                    policy.validate(f"https://{host}/whatever")
+            with self.subTest(host=host), self.assertRaises(player_guard.PlayerUrlError):
+                policy.validate(f"https://{host}/whatever")
 
     def test_python_and_injected_js_agree_on_ad_urls(self) -> None:
         """The bootstrap JS embeds the same policy the Python side enforces.

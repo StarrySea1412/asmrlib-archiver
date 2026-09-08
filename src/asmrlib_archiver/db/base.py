@@ -4,7 +4,6 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
   source_url TEXT PRIMARY KEY,

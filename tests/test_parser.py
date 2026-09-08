@@ -11,7 +11,6 @@ from asmrlib_archiver.archive_html import (
 from asmrlib_archiver.guards import UrlGuard
 from asmrlib_archiver.parser import AsmrlibParser
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = (
     ROOT

@@ -9,6 +9,7 @@ Online recording and proxying are intentionally not part of the bridge.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import socket
 import sys
@@ -204,10 +205,8 @@ class DesktopApi:
                     if self._mini is window:
                         self._mini = None
 
-            try:
+            with contextlib.suppress(Exception):
                 window.events.closed += _clear
-            except Exception:
-                pass
             return {"ok": True, "reused": False, "mode": "local"}
 
     def open_online_player(self, url: str) -> dict:
@@ -262,10 +261,8 @@ class DesktopApi:
         with self._lock:
             shield, self._online_shield = self._online_shield, None
         if shield is not None:
-            try:
+            with contextlib.suppress(Exception):
                 shield.close()
-            except Exception:
-                pass
 
     def _close(self) -> None:
         """Close child windows owned by the desktop bridge."""
@@ -335,18 +332,12 @@ def main() -> int:
     server_thread.start()
 
     def _shutdown() -> None:
-        try:
+        with contextlib.suppress(Exception):
             server.shutdown()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             server.server_close()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             viewer.close()
-        except Exception:
-            pass
 
     atexit.register(_shutdown)
     if not wait_for_port(host, port):

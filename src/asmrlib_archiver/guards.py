@@ -5,7 +5,8 @@ import unicodedata
 from dataclasses import dataclass
 from urllib.parse import quote, unquote_to_bytes, urldefrag, urljoin, urlparse, urlunparse
 
-from .security_lists import AD_DOMAIN_ALIASES, BLOCKED_HOSTS as DEFAULT_AD_DOMAINS
+from .security_lists import AD_DOMAIN_ALIASES
+from .security_lists import BLOCKED_HOSTS as DEFAULT_AD_DOMAINS
 
 # NOTE: DEFAULT_AD_DOMAINS and AD_DOMAIN_ALIASES are imported above from
 # security_lists.py, the single source of truth shared with online_shield.py

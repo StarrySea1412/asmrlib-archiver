@@ -10,7 +10,6 @@ from asmrlib_archiver.config import AppConfig, CrawlerConfig, DiscoveryConfig
 from asmrlib_archiver.crawler import Archiver
 from asmrlib_archiver.http_client import FetchResult
 
-
 TAG_URL = "https://asmrlib.com/tags/yoonying"
 POST_ONE = "https://asmrlib.com/posts/11111111111111111111111111111111"
 POST_TWO = "https://asmrlib.com/posts/22222222222222222222222222222222"

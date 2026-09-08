@@ -9,7 +9,6 @@ from bs4 import BeautifulSoup, Tag
 from .guards import GuardError, UrlGuard
 from .models import MediaCandidate, ParsedPage, ParsedSitePage, ParsedTagPage, SitePostCard
 
-
 MEDIA_EXTENSIONS = (
     ".mp4",
     ".m4v",
@@ -333,9 +332,8 @@ class AsmrlibParser:
             # media_decision allows same-domain always, plus whitelisted image
             # hosts only when allow_external_media is set. Accept either path so
             # a post on asmrlib plus an img-place.com poster both qualify.
-            if decision.allowed or self._image_host_allowed(normalized):
-                if self._looks_like_image(normalized) or normalized:
-                    return normalized
+            if (decision.allowed or self._image_host_allowed(normalized)) and (self._looks_like_image(normalized) or normalized):
+                return normalized
         return ""
 
     @staticmethod

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from .assets import (
     _CSS,
@@ -18,7 +18,6 @@ from .assets import (
     _MINI_PLAYER_JS,
     _UI_JS,
 )
-
 
 _APP_JS_EXTRA = r"""
 (function () {

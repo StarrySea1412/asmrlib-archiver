@@ -12,19 +12,27 @@ this module never requires a GUI runtime.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .security_lists import (
     ASSET_DOMAINS as DEFAULT_ASSET_DOMAINS,
+)
+from .security_lists import (
     BLOCK_URL_KEYWORDS as DEFAULT_BLOCK_URL_KEYWORDS,
+)
+from .security_lists import (
     BLOCKED_HOSTS as DEFAULT_BLOCKED_HOSTS,
+)
+from .security_lists import (
     PLAYER_DOMAINS as DEFAULT_PLAYER_DOMAINS,
 )
 
@@ -96,13 +104,12 @@ def normalize_url(url: str, *, base_url: str | None = None) -> str:
     """Normalize an HTTP(S) URL and reject parser-confusion primitives."""
 
     raw = str(url or "").strip()
-    if base_url and raw:
+    if base_url and raw and raw.startswith("/"):
         # URL joining is deliberately avoided here: player references are
         # expected to be absolute, and accepting ``//other-host`` is unsafe.
-        if raw.startswith("/"):
-            base = normalize_url(base_url)
-            parts = urlsplit(base)
-            raw = urlunsplit((parts.scheme, parts.netloc, raw, "", ""))
+        base = normalize_url(base_url)
+        parts = urlsplit(base)
+        raw = urlunsplit((parts.scheme, parts.netloc, raw, "", ""))
     if not raw:
         raise ShieldUrlError("missing_url", "missing URL")
     if any(ord(char) <= 0x20 or ord(char) == 0x7F for char in raw):
@@ -170,7 +177,7 @@ class ShieldPolicy:
         object.__setattr__(self, "block_url_keywords", clean_tokens(self.block_url_keywords))
 
     @classmethod
-    def from_config(cls, config: Any | None) -> "ShieldPolicy":
+    def from_config(cls, config: Any | None) -> ShieldPolicy:
         """Build a policy from ``AppConfig`` or a small mapping."""
 
         if isinstance(config, cls):
@@ -248,7 +255,7 @@ class ShieldPolicy:
 
     def navigation_decision(
         self, url: str, *, current_url: str | None = None, frame: bool = False
-    ) -> "ShieldDecision":
+    ) -> ShieldDecision:
         try:
             normalized = self.normalize(url, base_url=current_url)
         except ShieldUrlError as exc:
@@ -275,7 +282,7 @@ class ShieldPolicy:
         *,
         resource_type: str = "other",
         current_url: str | None = None,
-    ) -> "ShieldDecision":
+    ) -> ShieldDecision:
         context = _context_name(resource_type)
         if context in _DOCUMENT_CONTEXTS:
             return self.navigation_decision(
@@ -748,19 +755,15 @@ def _event_add(owner: Any, name: str, handler: Callable[..., Any]) -> Callable[[
             event.append(handler)
 
             def remove_list() -> None:
-                try:
+                with contextlib.suppress(ValueError, AttributeError):
                     event.remove(handler)
-                except (ValueError, AttributeError):
-                    pass
 
             return remove_list
         event += handler
 
-        def remove_dotnet() -> None:
-            try:
+        def remove_dotnet(event=event) -> None:
+            with contextlib.suppress(Exception):
                 event -= handler
-            except Exception:
-                pass
 
         return remove_dotnet
     except Exception:
@@ -906,10 +909,8 @@ class ShieldBinding:
                 default_popup = _get_nested(owner, "on_new_window_request")
                 if default_popup is None:
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     event -= default_popup
-                except Exception:
-                    pass
         # NavigationStarting is exposed by the WebView2 control; frame
         # navigation is exposed by CoreWebView2 on newer runtimes.
         if control is not None:
@@ -958,10 +959,8 @@ class ShieldBinding:
 
             add_filter("*", CoreWebView2WebResourceContext.All)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 add_filter("*")
-            except Exception:
-                pass
 
     def _inject_document_script(self, core: Any) -> None:
         add_script = getattr(core, "AddScriptToExecuteOnDocumentCreatedAsync", None)
@@ -1156,10 +1155,8 @@ class ShieldBinding:
 
     def detach(self) -> None:
         for remover in reversed(self._removers):
-            try:
+            with contextlib.suppress(Exception):
                 remover()
-            except Exception:
-                pass
         self._removers.clear()
         self.installed = False
 
@@ -1241,10 +1238,8 @@ class GuardedWebViewPlayer:
                     for method in ("show", "restore"):
                         callback = getattr(self.window, method, None)
                         if callable(callback):
-                            try:
+                            with contextlib.suppress(Exception):
                                 callback()
-                            except Exception:
-                                pass
                     return {"ok": True, "reused": True, "mode": "guarded-webview", "url": target}
                 except Exception:
                     if self.binding is not None:
@@ -1288,10 +1283,8 @@ class GuardedWebViewPlayer:
                         created_window, "close", None
                     )
                     if callable(callback):
-                        try:
+                        with contextlib.suppress(Exception):
                             callback()
-                        except Exception:
-                            pass
                 return {"ok": False, "code": "open_failed", "error": str(exc), "url": target}
 
     def _watch_closed(self, window: Any) -> None:
@@ -1319,10 +1312,8 @@ class GuardedWebViewPlayer:
         if window is not None:
             callback = getattr(window, "destroy", None) or getattr(window, "close", None)
             if callable(callback):
-                try:
+                with contextlib.suppress(Exception):
                     callback()
-                except Exception:
-                    pass
 
 
 # Naming used by a few integrations while the old sandbox was being removed.

@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup, Tag
 
 from .models import ParsedPage, ParsedTagPage
 
-
 ARCHIVE_MARKER = "asmrlib-archive-safe-v1"
 CONTENT_SECURITY_POLICY = (
     "default-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
@@ -164,12 +163,10 @@ def is_safe_archive_html(html: str) -> bool:
             name = str(raw_name).lower()
             if name.startswith("on") or name == "style":
                 return False
-            if name in URI_ATTRIBUTES:
-                if not _is_allowed_local_media_attr(node, name, raw_value):
-                    return False
-        if node.name == "meta" and node.get("http-equiv"):
-            if str(node.get("http-equiv")).lower() != "content-security-policy":
+            if name in URI_ATTRIBUTES and not _is_allowed_local_media_attr(node, name, raw_value):
                 return False
+        if node.name == "meta" and node.get("http-equiv") and str(node.get("http-equiv")).lower() != "content-security-policy":
+            return False
     return True
 
 
@@ -202,9 +199,7 @@ def _is_allowed_local_media_attr(node: Tag, name: str, raw_value: object) -> boo
     # further ".." could escape the archive root.
     if ".." in segments[1:]:
         return False
-    if value.startswith("/") or ":" in segments[0]:
-        return False
-    return True
+    return not (value.startswith("/") or ":" in segments[0])
 
 
 def _normalize_local_media_src(src: str) -> str:

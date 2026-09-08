@@ -4,7 +4,6 @@ import unittest
 
 from asmrlib_archiver.guards import BlockedRedirect, BlockedUrl, UrlGuard
 
-
 POST_ID = "77badb9b69d7bfbcc2fc3369e2d3b5ae"
 
 
