@@ -349,7 +349,7 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
   const policy = __POLICY_JSON__;
   const state = window.__asmrlibShieldState = {
     server: '', captcha: false, userSound: false, lastPlay: 0,
-    sawPlaying: false, mediaClicks: 0,
+    sawPlaying: false, mediaClicks: 0, cdpClicks: 0,
   };
   const hostOf = (value) => {
     try { return new URL(String(value || ''), location.href).hostname.toLowerCase().replace(/\.$/, ''); }
@@ -697,6 +697,27 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
           target.dispatchEvent(new MouseEvent('click', opts));
           state.mediaClicks += 1;
           acted = true;
+        } catch (_) {}
+      }
+    }
+    // Human-verification gates reject every synthetic click (isTrusted
+    // checks). Escalate to a CDP trusted click through the host: the
+    // player iframe's centre receives a real input event without the
+    // user's cursor moving. Capped and stopped on first playback.
+    if (!state.sawPlaying && window.top === window && state.cdpClicks < 3) {
+      const frame = document.querySelector('iframe[data-asmrlib-player]');
+      if (frame) {
+        try {
+          const r = frame.getBoundingClientRect();
+          if (r.width >= 200 && r.height >= 140) {
+            window.chrome.webview.postMessage(JSON.stringify({
+              type: 'asmrlib-autoplay-click',
+              x: Math.round(r.left + r.width / 2),
+              y: Math.round(r.top + r.height / 2),
+            }));
+            state.cdpClicks += 1;
+            acted = true;
+          }
         } catch (_) {}
       }
     }
@@ -1147,12 +1168,44 @@ class ShieldBinding:
         if not isinstance(payload, dict):
             return
         message_type = str(payload.get("type") or "")
+        if message_type == "asmrlib-autoplay-click":
+            # Human-verification gates reject synthetic JS clicks; a CDP
+            # Input.dispatchMouseEvent is a trusted input event to Chromium.
+            self._cdp_click(payload.get("x"), payload.get("y"))
+            return
         if message_type != "asmrlib-save":
             return
         url = str(payload.get("url") or "").strip()
         if url:
             self.record_sniff(url)
         self.start_save(url)
+
+    def _cdp_click(self, x: Any, y: Any) -> None:
+        core = self.core
+        dispatch = _get_nested(core, "CallDevToolsProtocolMethodAsync")
+        if not callable(dispatch):
+            return
+        try:
+            cx = max(0, int(float(x)))
+            cy = max(0, int(float(y)))
+        except (TypeError, ValueError):
+            return
+        self._cdp_clicks = getattr(self, "_cdp_clicks", 0) + 1
+        if self._cdp_clicks > 3:
+            return
+        for event_type in ("mousePressed", "mouseReleased"):
+            args = json.dumps({
+                "type": event_type,
+                "x": cx,
+                "y": cy,
+                "button": "left",
+                "clickCount": 1,
+                "pointerType": "mouse",
+            })
+            try:
+                dispatch("Input.dispatchMouseEvent", args)
+            except Exception:
+                return
 
     def start_save(self, url: str | None = None) -> dict[str, Any]:
         """Kick off a background save for ``url`` (default: latest sniff)."""
