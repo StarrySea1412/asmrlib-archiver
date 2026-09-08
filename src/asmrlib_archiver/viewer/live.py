@@ -170,12 +170,8 @@ class LivePages:
                 "内容",
                 (
                     f"<div class='live-feed' data-live-feed='{_h(endpoint)}'>"
-                    "<div data-live-feed-content aria-live='polite' aria-busy='true'>"
-                    "<div class='live-skeleton-grid' aria-hidden='true'>"
-                    + "<span class='live-skeleton-card'></span>" * 6
-                    + "</div></div>"
-                    "<button type='button' class='button button-secondary live-feed-retry' "
-                    "data-live-feed-retry hidden>重试</button></div>"
+                    "<div data-live-feed-content aria-live='polite' aria-busy='true'></div>"
+                    "</div>"
                 ),
             ),
         ]

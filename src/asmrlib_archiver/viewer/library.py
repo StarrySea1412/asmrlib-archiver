@@ -277,12 +277,8 @@ class LibraryPages:
                 "站点最新",
                 (
                     f"<div class='live-feed' data-live-feed='{_h(live_endpoint)}'>"
-                    "<div data-live-feed-content aria-live='polite' aria-busy='true'>"
-                    "<div class='live-skeleton-grid' aria-hidden='true'>"
-                    + "<span class='live-skeleton-card'></span>" * 8
-                    + "</div></div>"
-                    "<button type='button' class='button button-secondary live-feed-retry' "
-                    "data-live-feed-retry hidden>重试</button></div>"
+                    "<div data-live-feed-content aria-live='polite' aria-busy='true'></div>"
+                    "</div>"
                 ),
                 trailing="<a class='text-link' href='/browse'>查看全部 →</a>",
             )

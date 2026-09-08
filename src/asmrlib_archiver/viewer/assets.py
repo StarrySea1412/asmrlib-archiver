@@ -2043,6 +2043,28 @@ _CSS += """
 .live-feed-stale-note {
   text-align: center; margin: 10px 0 0; font-size: 12px;
 }
+.live-feed-state {
+  display: grid; place-items: center; gap: 10px;
+  padding: 40px 16px; text-align: center;
+}
+.live-feed-state .state-spinner {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 3px solid rgba(122, 162, 255, .22);
+  border-top-color: var(--accent, #7aa2ff);
+  animation: state-spin .9s linear infinite;
+}
+.live-feed-state .state-spinner-error {
+  border-top-color: var(--faint, #6b7c93);
+  animation-duration: 2.4s;
+}
+.live-feed-state .state-text { color: var(--muted, #93a3b8); font-size: 13px; }
+.live-feed-error-panel .state-title { font-size: 15px; }
+.live-feed-error-panel .state-sub { font-size: 12px; max-width: 360px; }
+.live-feed-error-panel .button { min-width: 120px; margin-top: 4px; }
+@keyframes state-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .live-feed-state .state-spinner { animation: none; }
+}
 """
 
 _CSS += _CINEMA_CSS

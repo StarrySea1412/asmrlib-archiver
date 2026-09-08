@@ -133,13 +133,31 @@ _APP_JS_EXTRA = r"""
     else host.appendChild(pager);
   }
 
+  function feedLoading(target) {
+    target.setAttribute('aria-busy', 'true');
+    target.innerHTML =
+      skeleton() +
+      '<div class="live-feed-state" role="status" aria-live="polite">' +
+      '<span class="state-spinner" aria-hidden="true"></span>' +
+      '<span class="state-text">正在加载站点内容…</span></div>';
+  }
+
+  function feedError(target, host) {
+    target.removeAttribute('aria-busy');
+    target.innerHTML =
+      '<div class="live-feed-state live-feed-error-panel" role="alert">' +
+      '<span class="state-spinner state-spinner-error" aria-hidden="true"></span>' +
+      '<strong class="state-title">实时内容暂时无法加载</strong>' +
+      '<span class="state-sub muted">可能是网络波动或站点暂时不可访问，稍后再试。</span>' +
+      '<button type="button" class="button" data-feed-reload>重新加载</button></div>';
+    var reload = target.querySelector('[data-feed-reload]');
+    if (reload) reload.addEventListener('click', function () { loadFeed(host); });
+  }
+
   function loadFeed(host) {
     var endpoint = host.getAttribute('data-live-feed') || '/api/live-feed';
     var target = host.querySelector('[data-live-feed-content]') || host;
-    var retry = host.querySelector('[data-live-feed-retry]');
-    target.setAttribute('aria-busy', 'true');
-    target.innerHTML = skeleton();
-    if (retry) retry.hidden = true;
+    feedLoading(target);
     // One silent retry rides out transient connection resets before the
     // user is asked to care.
     fetch(endpoint, {headers: {'Accept': 'application/json'}})
@@ -158,7 +176,6 @@ _APP_JS_EXTRA = r"""
           target.innerHTML = '';
           target.removeAttribute('aria-busy');
           setFeedVisibility(host, false);
-          if (retry) retry.hidden = true;
           return;
         }
         target.innerHTML = payload.html || '';
@@ -172,9 +189,7 @@ _APP_JS_EXTRA = r"""
       })
       .catch(function () {
         setFeedVisibility(host, true);
-        target.removeAttribute('aria-busy');
-        target.innerHTML = '<p class="live-feed-error" role="status">实时内容暂时无法加载。</p>';
-        if (retry) retry.hidden = false;
+        feedError(target, host);
       });
   }
 
@@ -182,8 +197,6 @@ _APP_JS_EXTRA = r"""
     var feeds = document.querySelectorAll('[data-live-feed]');
     for (var i = 0; i < feeds.length; i++) {
       (function (host) {
-        var retry = host.querySelector('[data-live-feed-retry]');
-        if (retry) retry.addEventListener('click', function () { loadFeed(host); });
         loadFeed(host);
       })(feeds[i]);
     }
