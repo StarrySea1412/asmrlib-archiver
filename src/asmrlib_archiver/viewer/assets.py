@@ -2049,13 +2049,24 @@ _CSS += """
   border-top-color: var(--accent, #7aa2ff);
   animation: state-spin .9s linear infinite;
 }
-.live-feed-state .state-spinner-error {
-  border-top-color: var(--faint, #6b7c93);
-  animation-duration: 2.4s;
-}
 .live-feed-state .state-text { color: var(--muted, #93a3b8); font-size: 13px; }
+.live-feed-error-panel {
+  max-width: 400px; margin: 26px auto;
+  padding: 30px 26px;
+  background: var(--panel, #111826);
+  border: 1px solid var(--line, rgba(255, 255, 255, .08));
+  border-radius: 14px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .38);
+}
+.live-feed-error-panel .state-glyph {
+  width: 46px; height: 46px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 22px; color: #f59e0b;
+  background: rgba(245, 158, 11, .12);
+  border: 1px solid rgba(245, 158, 11, .35);
+}
 .live-feed-error-panel .state-title { font-size: 15px; }
-.live-feed-error-panel .state-sub { font-size: 12px; max-width: 360px; }
+.live-feed-error-panel .state-sub { font-size: 12px; max-width: 320px; }
 .live-feed-error-panel .button { min-width: 120px; margin-top: 4px; }
 @keyframes state-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

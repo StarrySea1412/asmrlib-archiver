@@ -133,6 +133,14 @@ _APP_JS_EXTRA = r"""
     else host.appendChild(pager);
   }
 
+  function clearFeedExtras(host) {
+    // Pager/stale note belong to a *successful* render. They must disappear
+    // while loading and on failure, otherwise a dead 下一页 button sits
+    // under the error panel.
+    var extras = host.querySelectorAll('.live-feed-pager, .live-feed-stale-note');
+    for (var i = 0; i < extras.length; i++) extras[i].remove();
+  }
+
   function feedLoading(target) {
     target.setAttribute('aria-busy', 'true');
     target.innerHTML =
@@ -146,7 +154,7 @@ _APP_JS_EXTRA = r"""
     target.removeAttribute('aria-busy');
     target.innerHTML =
       '<div class="live-feed-state live-feed-error-panel" role="alert">' +
-      '<span class="state-spinner state-spinner-error" aria-hidden="true"></span>' +
+      '<span class="state-glyph" aria-hidden="true">⚠</span>' +
       '<strong class="state-title">实时内容暂时无法加载</strong>' +
       '<span class="state-sub muted">可能是网络波动或站点暂时不可访问，稍后再试。</span>' +
       '<button type="button" class="button" data-feed-reload>重新加载</button></div>';
@@ -157,6 +165,7 @@ _APP_JS_EXTRA = r"""
   function loadFeed(host) {
     var endpoint = host.getAttribute('data-live-feed') || '/api/live-feed';
     var target = host.querySelector('[data-live-feed-content]') || host;
+    clearFeedExtras(host);
     feedLoading(target);
     // One silent retry rides out transient connection resets before the
     // user is asked to care.
@@ -189,6 +198,7 @@ _APP_JS_EXTRA = r"""
       })
       .catch(function () {
         setFeedVisibility(host, true);
+        clearFeedExtras(host);
         feedError(target, host);
       });
   }
