@@ -83,13 +83,23 @@ def maybe_seed_data_from_dev_tree(root: Path) -> None:
 def pick_free_port(host: str = "127.0.0.1", preferred: int = 8765) -> int:
     for port in range(preferred, preferred + 40):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Windows lets SO_REUSEADDR bind an already-listening port, which
+            # silently double-binds and routes requests to the other process.
+            # Availability must be probed with an exclusive bind instead.
+            if sys.platform == "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.bind((host, port))
             except OSError:
                 continue
             return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if sys.platform == "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
 
