@@ -233,6 +233,7 @@ class DesktopApi:
                     self._online_shield = GuardedWebViewPlayer(
                         self._runtime_config,
                         title="ASMR 收藏馆 · 安全播放",
+                        save_dir=app_root() / "data" / "online-saves",
                     )
                 result = self._online_shield.open(target)
             if result.get("ok"):

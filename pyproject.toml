@@ -16,7 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-desktop = ["pywebview>=5.0", "pyinstaller>=6.0"]
+desktop = [
+    "pywebview>=5.0",
+    "pyinstaller>=6.0",
+    "pycryptodome>=3.23.0",
+]
 dev = ["pytest>=8.0.0", "ruff>=0.5.0", "coverage>=7.5.0"]
 
 [project.scripts]

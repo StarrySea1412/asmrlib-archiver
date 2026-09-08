@@ -16,6 +16,8 @@ import json
 import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
@@ -386,12 +388,30 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
       if (!src || src === 'about:blank') return;
       if (!playerUrl(src)) { kill(frame); return; }
       frame.setAttribute('data-asmrlib-player', '1');
+      frame.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+      frame.setAttribute('allowfullscreen', '');
+      // Cinema mode owns the player geometry; the base styling must not
+      // fight it on every MutationObserver tick.
+      if (frame.getAttribute('data-asmrlib-cinema-player') === '1') {
+        frame.style.setProperty('position', 'fixed', 'important');
+        frame.style.setProperty('inset', '0', 'important');
+        frame.style.setProperty('width', '100vw', 'important');
+        frame.style.setProperty('height', '100vh', 'important');
+        frame.style.setProperty('min-height', '0', 'important');
+        frame.style.setProperty('max-height', 'none', 'important');
+        frame.style.setProperty('border', '0', 'important');
+        frame.style.setProperty('background', '#000', 'important');
+        return;
+      }
       frame.style.setProperty('display', 'block', 'important');
       frame.style.setProperty('width', '100%', 'important');
       frame.style.setProperty('min-height', '560px', 'important');
       frame.style.setProperty('height', 'min(72vh, 760px)', 'important');
       frame.style.setProperty('border', '0', 'important');
       frame.style.setProperty('background', '#000', 'important');
+    });
+    root.querySelectorAll('video, video > source, audio, audio > source').forEach((el) => {
+      try { sniffMedia(el.getAttribute('src') || ''); } catch (_) {}
     });
   };
   const blockNavigation = (event) => {
@@ -423,6 +443,179 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
       };
     });
   } catch (_) {}
+  // ---- media sniffing (every frame; the player usually lives in an iframe) ----
+  const MEDIA_RE = /\.(m3u8|mpd|mp4|webm|m4s|ts|m4a|mp3|flac|ogg|wav)(?:[?#]|$)/i;
+  const sniffMedia = (value) => {
+    const raw = String(value || '');
+    if (!/^https?:/i.test(raw) || !MEDIA_RE.test(raw)) return;
+    try {
+      window.__asmrlibShieldMedia = raw;
+      const list = window.__asmrlibSniffed = window.__asmrlibSniffed || [];
+      if (list.indexOf(raw) < 0) { list.unshift(raw); if (list.length > 30) list.pop(); }
+    } catch (_) {}
+  };
+  try {
+    const originalFetch = window.fetch;
+    if (originalFetch) {
+      window.fetch = function (input) {
+        try { sniffMedia(typeof input === 'string' ? input : (input && input.url) || ''); } catch (_) {}
+        return originalFetch.apply(this, arguments);
+      };
+    }
+  } catch (_) {}
+  try {
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      try { sniffMedia(url); } catch (_) {}
+      return originalOpen.apply(this, arguments);
+    };
+  } catch (_) {}
+  // ---- cinema mode (top document only) + floating toolbar ----
+  if ((function () { try { return window.top === window; } catch (e) { return false; } })()) {
+    let cinemaOn = false;
+    let cinemaTried = false;
+    const hidden = [];
+    const CINEMA_HIDE = 'header,footer,nav,aside,.header,.footer,.navbar,.nav,.site-header,' +
+      '.site-footer,.breadcrumb,.breadcrumbs,.sidebar,#header,#footer,#topbar,.topbar,' +
+      '.comment-area,.comments,ins.adsbygoogle';
+    const toast = (message) => {
+      try {
+        const tip = document.createElement('div');
+        tip.textContent = String(message || '');
+        tip.setAttribute('data-asmrlib-toast', '1');
+        tip.style.cssText = 'position:fixed;left:50%;bottom:64px;transform:translateX(-50%);' +
+          'z-index:2147483647;background:rgba(7,9,13,.92);color:#e5e7eb;border:1px solid ' +
+          'rgba(196,181,253,.3);border-radius:8px;padding:8px 14px;max-width:70vw;' +
+          'word-break:break-all;font:12px/1.4 system-ui,sans-serif';
+        document.documentElement.appendChild(tip);
+        setTimeout(() => { try { tip.remove(); } catch (_) {} }, 2600);
+      } catch (_) {}
+    };
+    window.__asmrlibShieldToast = toast;
+    const playerFrame = () => document.querySelector('iframe[data-asmrlib-player]');
+    const setCinema = (on) => {
+      const player = playerFrame();
+      if (on && !player) return false;
+      if (on === cinemaOn) return true;
+      if (on) {
+        document.querySelectorAll('body > *').forEach((node) => {
+          if (node === player || node.contains(player)) return;
+          hidden.push({ node: node, prev: node.getAttribute('style') });
+          node.style.setProperty('display', 'none', 'important');
+        });
+        document.querySelectorAll(CINEMA_HIDE).forEach((node) => {
+          if (player && (node === player || node.contains(player))) return;
+          hidden.push({ node: node, prev: node.getAttribute('style') });
+          node.style.setProperty('display', 'none', 'important');
+        });
+        player.setAttribute('data-asmrlib-cinema-player', '1');
+        player.__asmrlibPrevStyle = player.getAttribute('style');
+        player.style.setProperty('position', 'fixed', 'important');
+        player.style.setProperty('inset', '0', 'important');
+        player.style.setProperty('width', '100vw', 'important');
+        player.style.setProperty('height', '100vh', 'important');
+        player.style.setProperty('min-height', '0', 'important');
+        player.style.setProperty('max-height', 'none', 'important');
+        player.style.setProperty('z-index', '2147483646', 'important');
+        document.body.style.setProperty('background', '#000', 'important');
+        document.documentElement.style.setProperty('background', '#000', 'important');
+        cinemaOn = true;
+      } else {
+        player = document.querySelector('[data-asmrlib-cinema-player]') || player;
+        if (player) {
+          if (player.__asmrlibPrevStyle === null) player.removeAttribute('style');
+          else player.setAttribute('style', player.__asmrlibPrevStyle || '');
+          player.removeAttribute('data-asmrlib-cinema-player');
+          try { delete player.__asmrlibPrevStyle; } catch (_) { player.__asmrlibPrevStyle = undefined; }
+        }
+        hidden.forEach((rec) => {
+          if (rec.prev === null) rec.node.removeAttribute('style');
+          else rec.node.setAttribute('style', rec.prev);
+        });
+        hidden.length = 0;
+        cinemaOn = false;
+      }
+      return true;
+    };
+    window.__asmrlibShieldCinema = setCinema;
+    const goFullscreen = () => {
+      const target = playerFrame() || document.documentElement;
+      const fn = target.requestFullscreen || target.webkitRequestFullscreen;
+      if (fn) {
+        try {
+          const requested = fn.call(target);
+          if (requested && requested.catch) requested.catch(() => toast('浏览器拒绝了全屏请求'));
+        } catch (_) { toast('当前环境不支持全屏'); }
+      } else toast('当前环境不支持全屏');
+    };
+    const goPip = () => {
+      const video = document.querySelector('video');
+      if (video && document.pictureInPictureEnabled && video.requestPictureInPicture) {
+        video.requestPictureInPicture().catch(() => toast('无法进入小窗（视频可能在跨域播放器内）'));
+      } else toast('页面上没有可小窗的视频');
+    };
+    const doSave = () => {
+      const url = String(window.__asmrlibShieldMedia || '');
+      if (!url) { toast('尚未捕获到视频地址，播放片刻后重试'); return; }
+      const sent = (() => {
+        try {
+          window.chrome.webview.postMessage(JSON.stringify({ type: 'asmrlib-save', url: url }));
+          return true;
+        } catch (_) { return false; }
+      })();
+      toast(sent ? '开始保存：' + url.slice(0, 80) : '无法连接保存服务，视频地址：' + url.slice(0, 120));
+    };
+    const buildToolbar = () => {
+      if (document.getElementById('asmrlib-shield-bar') || !document.body) return;
+      const bar = document.createElement('div');
+      bar.id = 'asmrlib-shield-bar';
+      bar.setAttribute('data-asmrlib-toolbar', '1');
+      bar.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:2147483647;display:flex;' +
+        'gap:6px;background:rgba(7,9,13,.9);border:1px solid rgba(196,181,253,.28);' +
+        'border-radius:10px;padding:6px;box-shadow:0 8px 28px rgba(0,0,0,.55)';
+      const mk = (label, title, fn) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.title = title;
+        button.style.cssText = 'all:unset;cursor:pointer;padding:7px 11px;border-radius:7px;' +
+          'color:#e5e7eb;background:rgba(255,255,255,.08);font:12px/1 system-ui,sans-serif;user-select:none';
+        button.addEventListener('mouseenter', () => { button.style.background = 'rgba(196,181,253,.3)'; });
+        button.addEventListener('mouseleave', () => { button.style.background = 'rgba(255,255,255,.08)'; });
+        button.addEventListener('click', (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          try { fn(); } catch (_) {}
+        });
+        bar.appendChild(button);
+        return button;
+      };
+      mk('影院', '纯黑沉浸模式（再点还原）', () => { setCinema(!cinemaOn); });
+      mk('全屏', '播放器全屏', goFullscreen);
+      mk('小窗', '画中画', goPip);
+      const save = mk('保存', '保存捕获到的视频', doSave);
+      document.body.appendChild(bar);
+      setInterval(() => {
+        const has = String(window.__asmrlibShieldMedia || '');
+        save.style.opacity = has ? '1' : '.55';
+        save.title = has ? '保存视频：' + has.slice(0, 90) : '保存捕获到的视频';
+      }, 900);
+    };
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && cinemaOn && !document.fullscreenElement) setCinema(false);
+    });
+    const tryAutoCinema = () => {
+      if (cinemaTried || cinemaOn) return;
+      const player = playerFrame();
+      if (!player) return;
+      cinemaTried = true;
+      setTimeout(() => { if (!cinemaOn && playerFrame()) setCinema(true); }, 900);
+    };
+    tryAutoCinema();
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => { tryAutoCinema(); buildToolbar(); }, { once: true });
+    } else buildToolbar();
+    window.__asmrlibShieldTick = function () { tryAutoCinema(); buildToolbar(); };
+  }
   const pickServer = () => {
     if (state.server) return false;
     const buttons = Array.from(document.querySelectorAll('button[data-url],a[data-url]'));
@@ -470,9 +663,10 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
   const boot = () => { scrub(document); pickServer(); play(); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
-  try { new MutationObserver(() => { scrub(document); pickServer(); play(); }).observe(document.documentElement, { childList: true, subtree: true }); } catch (_) {}
+  const tick = () => { if (window.__asmrlibShieldTick) { try { window.__asmrlibShieldTick(); } catch (_) {} } };
+  try { new MutationObserver(() => { scrub(document); pickServer(); play(); tick(); }).observe(document.documentElement, { childList: true, subtree: true }); } catch (_) {}
   let attempts = 0;
-  const timer = setInterval(() => { attempts += 1; scrub(document); pickServer(); play(); if (attempts > 60) clearInterval(timer); }, 600);
+  const timer = setInterval(() => { attempts += 1; scrub(document); pickServer(); play(); tick(); if (attempts > 60) clearInterval(timer); }, 600);
 })();
 """
 
@@ -620,7 +814,14 @@ def _resolve_native_targets(window: Any, target: Any = None) -> tuple[Any, Any]:
 class ShieldBinding:
     """Installed event handlers and script for one native WebView instance."""
 
-    def __init__(self, window: Any, target: Any, policy: ShieldPolicy) -> None:
+    def __init__(
+        self,
+        window: Any,
+        target: Any,
+        policy: ShieldPolicy,
+        *,
+        save_dir: Path | None = None,
+    ) -> None:
         self.window = window
         self.target = target
         self.policy = policy
@@ -630,6 +831,11 @@ class ShieldBinding:
         self.control = None
         self.installed = False
         self.pending = True
+        self.save_dir = Path(save_dir) if save_dir else None
+        self.sniffed_media: list[str] = []
+        self._sniff_lock = threading.Lock()
+        self._sniffed_seen: set[str] = set()
+        self._saves: dict[str, dict[str, Any]] = {}
         self._removers: list[Callable[[], None]] = []
         self._script_task = None
         self._current_url = ""
@@ -685,6 +891,7 @@ class ShieldBinding:
         self.pending = False
         self._filter_requests(core)
         self._inject_document_script(core)
+        self._subscribe(core, "WebMessageReceived", self._on_web_message)
         # pywebview's default handler may navigate popups in the same window
         # (or hand them to the system browser). Remove it so the shield's
         # explicit deny policy is the only NewWindowRequested behavior.
@@ -804,6 +1011,8 @@ class ShieldBinding:
     def _on_resource(self, _sender: Any, args: Any) -> None:
         url = self._request_url(args)
         context = self._resource_type(args)
+        if context in _MEDIA_CONTEXTS:
+            self._maybe_sniff(url)
         decision = self.policy.request_decision(
             url, resource_type=context, current_url=self._current_url or None
         )
@@ -857,6 +1066,94 @@ class ShieldBinding:
         # Some WebView2 versions use lower-case Python properties in wrappers.
         _set_flag(args, "handled", True)
 
+    # ------------------------------------------------------------- sniffing
+
+    _MEDIA_URL_RE = re.compile(
+        r"https?://[^\s\"'<>]+?\.(?:m3u8|mpd|mp4|webm|m4s|ts|m4a|mp3|flac|ogg|wav)(?:[?#][^\s\"'<>]*)?",
+        re.IGNORECASE,
+    )
+
+    def record_sniff(self, url: str) -> bool:
+        """Remember a media URL seen by the page (or the network layer)."""
+
+        value = str(url or "").strip()
+        if not value.lower().startswith(("http://", "https://")):
+            return False
+        with self._sniff_lock:
+            if value in self._sniffed_seen:
+                return False
+            self._sniffed_seen.add(value)
+            self.sniffed_media.insert(0, value)
+            del self.sniffed_media[30:]
+        return True
+
+    def _maybe_sniff(self, url: str) -> None:
+        if self._MEDIA_URL_RE.fullmatch(url):
+            self.record_sniff(url)
+
+    def _on_web_message(self, _sender: Any, args: Any) -> None:
+        raw = str(_get_nested(args, "WebMessageAsJson", "web_message_as_json", default="") or "")
+        payload: Any = None
+        if raw:
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                payload = None
+        if payload is None:
+            try:
+                payload = json.loads(str(_get_nested(args, "TryGetWebMessageAsString", default="") or "{}"))
+            except ValueError:
+                return
+        if not isinstance(payload, dict):
+            return
+        message_type = str(payload.get("type") or "")
+        if message_type != "asmrlib-save":
+            return
+        url = str(payload.get("url") or "").strip()
+        if url:
+            self.record_sniff(url)
+        self.start_save(url)
+
+    def start_save(self, url: str | None = None) -> dict[str, Any]:
+        """Kick off a background save for ``url`` (default: latest sniff)."""
+
+        target = str(url or "").strip()
+        if not target:
+            with self._sniff_lock:
+                target = self.sniffed_media[0] if self.sniffed_media else ""
+        if not target:
+            return {"ok": False, "code": "no_media", "error": "尚未捕获到视频地址"}
+        if self._MEDIA_URL_RE.fullmatch(target):
+            self.record_sniff(target)
+        task_id = f"save-{int(datetime.now().timestamp() * 1000)}"
+        self._saves[task_id] = {"ok": None, "url": target, "started": True}
+
+        def _run() -> None:
+            try:
+                self._saves[task_id] = self._save_worker(target)
+            except Exception as exc:  # noqa: BLE001 - surfaced via save_results()
+                self._saves[task_id] = {"ok": False, "code": "save_crashed", "error": str(exc)}
+
+        thread = threading.Thread(target=_run, name=f"asmrlib-{task_id}", daemon=True)
+        thread.start()
+        return {"ok": True, "task": task_id, "url": target, "started": True}
+
+    def _save_worker(self, target: str) -> dict[str, Any]:
+        """Run on a background thread; overridden in tests."""
+
+        from .media_save import save_media
+
+        return save_media(
+            target,
+            save_dir=self.save_dir,
+            allow_media=lambda value: not self.policy.is_ad_url(value),
+        )
+
+    def save_results(self) -> dict[str, dict[str, Any]]:
+        """Snapshot of started/completed save tasks (for tests and diagnostics)."""
+
+        return dict(self._saves)
+
     def detach(self) -> None:
         for remover in reversed(self._removers):
             try:
@@ -871,6 +1168,8 @@ def attach_webview_shield(
     window: Any = None,
     target: Any = None,
     policy: ShieldPolicy | Mapping[str, Any] | Any | None = None,
+    *,
+    save_dir: Path | None = None,
 ) -> ShieldBinding:
     """Attach request/navigation/popup guards and document-start automation.
 
@@ -880,7 +1179,7 @@ def attach_webview_shield(
     installs itself as soon as CoreWebView2 becomes available.
     """
 
-    binding = ShieldBinding(window, target, ShieldPolicy.from_config(policy))
+    binding = ShieldBinding(window, target, ShieldPolicy.from_config(policy), save_dir=save_dir)
     binding.install()
     return binding
 
@@ -897,6 +1196,7 @@ class GuardedWebViewPlayer:
         height: int = 760,
         on_top: bool = False,
         webview_module: Any | None = None,
+        save_dir: Path | None = None,
     ) -> None:
         self.policy = ShieldPolicy.from_config(policy)
         self.title = title
@@ -904,6 +1204,7 @@ class GuardedWebViewPlayer:
         self.height = height
         self.on_top = on_top
         self._webview_module = webview_module
+        self.save_dir = Path(save_dir) if save_dir else None
         self.window: Any = None
         self.binding: ShieldBinding | None = None
         self._lock = threading.RLock()
@@ -933,7 +1234,7 @@ class GuardedWebViewPlayer:
             if self.window is not None:
                 try:
                     if self.binding is None or not self.binding.installed:
-                        self.binding = attach_webview_shield(self.window, policy=self.policy)
+                        self.binding = attach_webview_shield(self.window, policy=self.policy, save_dir=self.save_dir)
                     if not self.binding.wait_until_ready():
                         raise RuntimeError("WebView2 shield did not become ready")
                     self.window.load_url(target)
@@ -971,7 +1272,7 @@ class GuardedWebViewPlayer:
                 waiter = getattr(loaded, "wait", None)
                 if callable(waiter):
                     waiter(5)
-                self.binding = attach_webview_shield(self.window, policy=self.policy)
+                self.binding = attach_webview_shield(self.window, policy=self.policy, save_dir=self.save_dir)
                 if not self.binding.wait_until_ready():
                     raise RuntimeError("WebView2 shield did not become ready")
                 self.window.load_url(target)
