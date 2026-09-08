@@ -349,7 +349,7 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
   const policy = __POLICY_JSON__;
   const state = window.__asmrlibShieldState = {
     server: '', captcha: false, userSound: false, lastPlay: 0,
-    sawPlaying: false, mediaClicks: 0, cdpClicks: 0,
+    sawPlaying: false, mediaClicks: 0, cdpClicks: 0, gateReported: false,
   };
   const hostOf = (value) => {
     try { return new URL(String(value || ''), location.href).hostname.toLowerCase().replace(/\.$/, ''); }
@@ -701,23 +701,62 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
       }
     }
     // Human-verification gates reject every synthetic click (isTrusted
-    // checks). Escalate to a CDP trusted click through the host: the
-    // player iframe's centre receives a real input event without the
-    // user's cursor moving. Capped and stopped on first playback.
+    // checks). The gate button lives inside a cross-origin iframe, so no
+    // single document can see the full geometry: the frame script reports
+    // the button position as a fraction of the frame viewport, the top
+    // script reports the frame rect, and the host combines both for one
+    // CDP trusted click.
+    if (!state.gateReported) {
+      const gateRe = /验证你是真人|播放视频|verify you are human/i;
+      const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((b) => {
+        try {
+          const r = b.getBoundingClientRect();
+          return r.width >= 20 && r.height >= 10 && gateRe.test(b.textContent || '');
+        } catch (_) { return false; }
+      });
+      const gated = button || (document.body && gateRe.test(document.body.innerText || ''));
+      if (gated) {
+        state.gateReported = true;
+        try {
+          const r = button ? button.getBoundingClientRect() : null;
+          const vw = window.innerWidth || 1;
+          const vh = window.innerHeight || 1;
+          window.chrome.webview.postMessage(JSON.stringify({
+            type: 'asmrlib-gate-button',
+            fx: r ? Math.min(1, Math.max(0, (r.left + r.width / 2) / vw)) : 0.5,
+            fy: r ? Math.min(1, Math.max(0, (r.top + r.height / 2) / vh)) : 0.5,
+            inFrame: window.top !== window,
+          }));
+        } catch (_) {}
+      }
+    }
     if (!state.sawPlaying && window.top === window && state.cdpClicks < 3) {
-      const frame = document.querySelector('iframe[data-asmrlib-player]');
+      const marked = document.querySelector('iframe[data-asmrlib-player]');
+      const frames = Array.from(document.querySelectorAll('iframe'))
+        .filter((f) => {
+          try {
+            const r = f.getBoundingClientRect();
+            return r.width >= 200 && r.height >= 140;
+          } catch (_) { return false; }
+        })
+        .sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return (rb.width * rb.height) - (ra.width * ra.height);
+        });
+      const frame = marked || frames[0];
       if (frame) {
         try {
           const r = frame.getBoundingClientRect();
-          if (r.width >= 200 && r.height >= 140) {
-            window.chrome.webview.postMessage(JSON.stringify({
-              type: 'asmrlib-autoplay-click',
-              x: Math.round(r.left + r.width / 2),
-              y: Math.round(r.top + r.height / 2),
-            }));
-            state.cdpClicks += 1;
-            acted = true;
-          }
+          window.chrome.webview.postMessage(JSON.stringify({
+            type: 'asmrlib-gate-frame',
+            x: Math.round(r.left),
+            y: Math.round(r.top),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          }));
+          state.cdpClicks += 1;
+          acted = true;
         } catch (_) {}
       }
     }
@@ -1190,9 +1229,33 @@ class ShieldBinding:
         if not isinstance(payload, dict):
             return
         message_type = str(payload.get("type") or "")
+        if message_type == "asmrlib-gate-button":
+            # Position of the verification button as a fraction of its own
+            # frame's viewport (the frame is cross-origin, so this is the
+            # only coordinate the frame script can provide).
+            try:
+                self._gate_button = (
+                    max(0.0, min(1.0, float(payload.get("fx", 0.5)))),
+                    max(0.0, min(1.0, float(payload.get("fy", 0.5)))),
+                )
+            except (TypeError, ValueError):
+                self._gate_button = (0.5, 0.5)
+            self._schedule_gate_click()
+            return
+        if message_type == "asmrlib-gate-frame":
+            try:
+                self._gate_frame = (
+                    max(0, int(float(payload.get("x", 0)))),
+                    max(0, int(float(payload.get("y", 0)))),
+                    max(0, int(float(payload.get("w", 0)))),
+                    max(0, int(float(payload.get("h", 0)))),
+                )
+            except (TypeError, ValueError):
+                self._gate_frame = None
+            self._schedule_gate_click()
+            return
         if message_type == "asmrlib-autoplay-click":
-            # Human-verification gates reject synthetic JS clicks; a CDP
-            # Input.dispatchMouseEvent is a trusted input event to Chromium.
+            # Legacy payload: direct page coordinates.
             self._cdp_click(payload.get("x"), payload.get("y"))
             return
         if message_type != "asmrlib-save":
@@ -1201,6 +1264,38 @@ class ShieldBinding:
         if url:
             self.record_sniff(url)
         self.start_save(url)
+
+    def _schedule_gate_click(self) -> None:
+        """Combine frame rect + button fraction and click once per spot.
+
+        The two messages arrive from different documents; only click when
+        both are known. Coordinates that were already tried are skipped so
+        observer ticks do not machine-gun the gate (some gates escalate on
+        repeated identical clicks).
+        """
+
+        frame = getattr(self, "_gate_frame", None)
+        if not frame:
+            return
+        fx, fy = getattr(self, "_gate_button", (0.5, 0.5))
+        gx = int(frame[0] + frame[2] * fx)
+        gy = int(frame[1] + frame[3] * fy)
+        tried = getattr(self, "_gate_tried", set())
+        if not hasattr(self, "_gate_tried"):
+            self._gate_tried = tried
+        if (gx, gy) in tried:
+            return
+        tried.add((gx, gy))
+
+        def _delayed() -> None:
+            core = self.core
+            if core is None or not getattr(self, "installed", False):
+                return
+            self._cdp_click(gx, gy)
+
+        timer = threading.Timer(0.8, _delayed)
+        timer.daemon = True
+        timer.start()
 
     def _cdp_click(self, x: Any, y: Any) -> None:
         core = self.core
@@ -1215,15 +1310,15 @@ class ShieldBinding:
         self._cdp_clicks = getattr(self, "_cdp_clicks", 0) + 1
         if self._cdp_clicks > 3:
             return
-        for event_type in ("mousePressed", "mouseReleased"):
-            args = json.dumps({
-                "type": event_type,
-                "x": cx,
-                "y": cy,
-                "button": "left",
-                "clickCount": 1,
-                "pointerType": "mouse",
-            })
+        # mouseMoved first so :hover states settle, then press + release
+        # with a matching clickCount.
+        sequence = (
+            ("mouseMoved", {"x": cx, "y": cy, "button": "none"}),
+            ("mousePressed", {"x": cx, "y": cy, "button": "left", "clickCount": 1}),
+            ("mouseReleased", {"x": cx, "y": cy, "button": "left", "clickCount": 1}),
+        )
+        for event_type, base in sequence:
+            args = json.dumps({"type": event_type, **base, "pointerType": "mouse"})
             try:
                 dispatch("Input.dispatchMouseEvent", args)
             except Exception:
