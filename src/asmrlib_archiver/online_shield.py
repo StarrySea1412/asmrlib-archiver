@@ -721,10 +721,32 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
         } catch (_) {}
       }
     }
+    // Every automated path exhausted: some gates are physically manual.
+    // Show a clear hint instead of failing silently; it self-removes the
+    // moment playback starts.
+    if (!state.sawPlaying && window.top === window && state.cdpClicks >= 3) {
+      ensureManualHint();
+    }
     return acted;
   };
+  const ensureManualHint = () => {
+    if (document.getElementById('asmrlib-manual-play-hint')) return;
+    const hint = document.createElement('div');
+    hint.id = 'asmrlib-manual-play-hint';
+    hint.setAttribute('role', 'status');
+    hint.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);' +
+      'z-index:2147483647;background:rgba(7,9,13,.94);color:#e5e7eb;padding:10px 18px;' +
+      'border:1px solid rgba(245,158,11,.45);border-radius:10px;font:13px/1.5 system-ui,' +
+      'sans-serif;box-shadow:0 10px 30px rgba(0,0,0,.5);text-align:center';
+    hint.textContent = '此播放器要求人工验证：请点击一次播放按钮，其余自动完成。';
+    document.documentElement.appendChild(hint);
+  };
   document.addEventListener('playing', (event) => {
-    if (event.target && /^VIDEO$/i.test(event.target.tagName)) state.sawPlaying = true;
+    if (event.target && /^VIDEO$/i.test(event.target.tagName)) {
+      state.sawPlaying = true;
+      const hint = document.getElementById('asmrlib-manual-play-hint');
+      if (hint) hint.remove();
+    }
   }, true);
   document.addEventListener('volumechange', (event) => {
     if (event.target && /^(VIDEO|AUDIO)$/.test(event.target.tagName)) state.userSound = true;
