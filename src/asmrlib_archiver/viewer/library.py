@@ -229,12 +229,13 @@ class LibraryPages:
             body.append(startup_banner)
 
         # Content first: what you came for.  Do not leave an empty rail title
-        # in an archive that has not been populated yet.
+        # in an archive that has not been populated yet.  Grids everywhere:
+        # horizontal scroll rails cramped the layout and hid most cards.
         if recent:
             body.append(
                 section_block(
                     "最近归档",
-                    self._post_cards(recent, rail=True, rail_label="最近归档"),
+                    self._post_cards(recent),
                     trailing="<a class='text-link' href='/posts'>全部 →</a>",
                 )
             )
@@ -256,7 +257,7 @@ class LibraryPages:
                 body.append(
                     section_block(
                         "本地已可播",
-                        self._post_cards(playable_items, rail=True, rail_label="本地已可播"),
+                        self._post_cards(playable_items),
                         trailing=status_chip(str(len(playable_items)), ok=True),
                     )
                 )

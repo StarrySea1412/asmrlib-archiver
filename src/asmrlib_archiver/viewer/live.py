@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from time import monotonic
 from urllib.parse import quote, urlencode, urlparse, urlunsplit
 
 from .components import (
@@ -212,8 +213,36 @@ class LivePages:
             subtitle="页面已就绪，正在载入 asmrlib 最新内容。",
         )
 
+    # Fresh results are reused for a few minutes so page loads never hammer
+    # the remote site.  When the remote fetch fails, the last successful
+    # payload is still served (stale) instead of showing a manual retry.
+    _LIVE_FEED_TTL_SECONDS = 180.0
+    _LIVE_FEED_STALE_MAX_SECONDS = 3600.0
+
+    def _live_feed_cached(self, query: dict[str, list[str]]) -> dict:
+        cache: dict[str, tuple[float, dict]] = getattr(
+            self, "_live_feed_cache", {}
+        )
+        if not hasattr(self, "_live_feed_cache"):
+            self._live_feed_cache = cache
+        key = urlencode(sorted((k, v) for k, values in query.items() for v in values))
+        now = monotonic()
+        cached = cache.get(key)
+        if cached and now - cached[0] < self._LIVE_FEED_TTL_SECONDS:
+            return cached[1]
+        payload = self._live_feed_payload(query)
+        if payload.get("ok"):
+            cache[key] = (now, payload)
+            return payload
+        if cached and now - cached[0] < self._LIVE_FEED_STALE_MAX_SECONDS:
+            stale = dict(cached[1])
+            stale["stale"] = True
+            return stale
+        return payload
+
     def _live_feed_payload(self, query: dict[str, list[str]]) -> dict:
         """Fetch and render a validated live-feed fragment for internal use."""
+
         scope = self._query_value(query, "scope", "browse").lower()
         raw_url = self._query_value(query, "url")
         slug = self._query_value(query, "tag")

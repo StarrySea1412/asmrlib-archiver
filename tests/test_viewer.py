@@ -138,6 +138,50 @@ class ViewerTests(unittest.TestCase):
             "origin retry must run before the fallback plate is revealed",
         )
 
+    def test_live_feed_cache_serves_stale_on_failure(self) -> None:
+        # Transient remote failures must not surface the manual retry state
+        # while a recent payload exists: the stale copy is served instead.
+        calls = []
+
+        def fake_payload(query):
+            calls.append(dict(query))
+            if len(calls) == 1:
+                return {"ok": True, "html": "<div>x</div>", "next": "/browse?page=2"}
+            return {"ok": False, "html": "", "error": "boom"}
+
+        self.viewer._live_feed_cache = {}
+        self.viewer._live_feed_payload = fake_payload  # type: ignore[method-assign]
+
+        query = {"scope": ["browse"], "page": ["1"]}
+        first = self.viewer._live_feed_cached(query)
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(calls), 1)
+
+        # Fresh cache window: no remote call at all.
+        again = self.viewer._live_feed_cached(query)
+        self.assertTrue(again["ok"])
+        self.assertEqual(len(calls), 1)
+
+        # After TTL expiry the remote fetch fails; the stale copy is served
+        # with the stale flag instead of the error payload.
+        cached_at, cached_payload = self.viewer._live_feed_cache[
+            "page=1&scope=browse"
+        ]
+        self.viewer._live_feed_cache["page=1&scope=browse"] = (
+            cached_at - 1800.0,
+            cached_payload,
+        )
+        stale = self.viewer._live_feed_cached(query)
+        self.assertTrue(stale["ok"])
+        self.assertTrue(stale.get("stale"))
+        self.assertEqual(len(calls), 2)
+
+    def test_home_renders_grids_without_horizontal_rails(self) -> None:
+        home = self.viewer._render_home({})
+        # 最近归档 / 本地已可播 / 站点最新 all render as cover grids now.
+        self.assertNotIn("data-live-feed-mode='rail'", home)
+        self.assertNotIn("data-cinema-rail", home)
+
     def test_home_and_detail_render_cover_image(self) -> None:
         import inspect
 

@@ -96,6 +96,17 @@ _APP_JS_EXTRA = r"""
   function renderFeedPager(host, payload) {
     var existing = host.querySelector('.live-feed-pager');
     if (existing) existing.remove();
+    var staleNote = host.querySelector('.live-feed-stale-note');
+    if (staleNote) staleNote.remove();
+    if (payload && payload.stale) {
+      var note = document.createElement('p');
+      note.className = 'live-feed-stale-note muted';
+      note.setAttribute('role', 'status');
+      note.textContent = '网络波动，当前显示最近一次成功加载的内容。';
+      var content = host.querySelector('[data-live-feed-content]');
+      if (content && content.parentElement) content.parentElement.appendChild(note);
+      else host.appendChild(note);
+    }
     var nextLink = payload && payload.next ? String(payload.next) : '';
     var prevLink = payload && payload.previous ? String(payload.previous) : '';
     if (!nextLink && !prevLink) return;
@@ -129,7 +140,14 @@ _APP_JS_EXTRA = r"""
     target.setAttribute('aria-busy', 'true');
     target.innerHTML = skeleton();
     if (retry) retry.hidden = true;
+    // One silent retry rides out transient connection resets before the
+    // user is asked to care.
     fetch(endpoint, {headers: {'Accept': 'application/json'}})
+      .catch(function () {
+        return new Promise(function (resolve) {
+          setTimeout(function () { resolve(fetch(endpoint, {headers: {'Accept': 'application/json'}})); }, 900);
+        });
+      })
       .then(function (response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();

@@ -512,7 +512,7 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                 self._send_json(handler, self._sync_status_payload())
                 return
             if path == "/api/live-feed":
-                self._send_json(handler, self._live_feed_payload(query))
+                self._send_json(handler, self._live_feed_cached(query))
                 return
             if path in {"/ui/app.css", "/ui/app.js"}:
                 asset = static_asset(path)

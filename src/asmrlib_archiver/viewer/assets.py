@@ -2040,6 +2040,9 @@ _CSS += """
   gap: 12px; margin-top: 18px;
 }
 .live-feed-pager .button { min-width: 108px; }
+.live-feed-stale-note {
+  text-align: center; margin: 10px 0 0; font-size: 12px;
+}
 """
 
 _CSS += _CINEMA_CSS
