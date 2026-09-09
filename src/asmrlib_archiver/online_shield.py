@@ -394,7 +394,15 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
     root.querySelectorAll('iframe').forEach((frame) => {
       const src = frame.getAttribute('src') || frame.src || '';
       if (!src || src === 'about:blank') return;
-      if (!playerUrl(src)) { kill(frame); return; }
+      if (adUrl(src)) { kill(frame); return; }
+      if (!playerUrl(src)) {
+        // Unknown host, not on the ad lists: the site may have added a new
+        // player domain or embedded a verification gate. Do not destroy it
+        // blindly — flag it for the host to decide (the network layer
+        // still blocks anything the policy rejects).
+        frame.setAttribute('data-asmrlib-unknown-frame', '1');
+        return;
+      }
       frame.setAttribute('data-asmrlib-player', '1');
       frame.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
       frame.setAttribute('allowfullscreen', '');
