@@ -16,12 +16,15 @@ safe-ish (ads stripped, popups killed, cinema mode applied).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import httpx
 
-from .security_lists import PLAYER_DOMAINS
+from .security_lists import PLAYER_DOMAINS, SOURCE_RANKING, SOURCE_RANKING_DEFAULT
+from .source_health import RankedSource, SourceHealth, rank_sources
 
 
 @dataclass(frozen=True)
@@ -53,24 +56,40 @@ def _is_player_host(url: str) -> bool:
 
 
 def _rank(label: str, url: str) -> int:
-    """Prefer the same server order the in-page auto-picker uses."""
+    """Prefer the same server order the in-page auto-picker uses.
+
+    This is a *static* preference read off the label/URL — it says which
+    server the site lists first, never whether that server works today.  It
+    is kept only as the tie-break for :func:`rank_sources`; the primary
+    ordering is the measured health record (see ``source_health``).
+
+    The order itself lives in ``security_lists.SOURCE_RANKING``, which the
+    injected shield JS renders from as well, so the two can no longer drift.
+    Only the label and the URL are consulted here: the ``data-server``
+    attribute that the JS also matches on is not available to a fetched,
+    parsed page.
+    """
 
     lowered_label = label.strip().upper()
     lowered_url = url.lower()
-    if "bysetayico" in lowered_url or lowered_label == "BI":
-        return 0
-    if "upn.one" in lowered_url or lowered_label == "UP":
-        return 1
-    if "abyss" in lowered_url or lowered_label == "AB":
-        return 2
-    return 9
+    for tier in SOURCE_RANKING:
+        if lowered_label == tier.label or any(
+            marker in lowered_url for marker in tier.url_markers
+        ):
+            return tier.rank
+    return SOURCE_RANKING_DEFAULT
 
 
-def resolve_player_url(url: str, *, timeout_seconds: float = 12.0) -> ResolvedPlayer:
-    """Fetch a post page and extract the bare player embed URLs.
+def resolve_player_candidates(
+    url: str, *, timeout_seconds: float = 12.0
+) -> list[tuple[str, str]]:
+    """Return ``[(label, url)]`` for every player embed on a post page.
 
-    Raises ``PlayerResolveError`` so callers can distinguish "already a
-    player URL" from "resolution failed, fall back to the page".
+    The order is the static server preference — callers that know the
+    measured health of each source should pass this through
+    ``source_health.rank_sources`` before showing or opening anything.
+
+    Raises ``PlayerResolveError`` when the page exposes no player at all.
     """
 
     try:
@@ -79,7 +98,7 @@ def resolve_player_url(url: str, *, timeout_seconds: float = 12.0) -> ResolvedPl
         raise PlayerResolveError("invalid_url", str(exc)) from exc
     if _is_player_host(url):
         # Already a bare player link (e.g. from the "在线来源" picker).
-        return ResolvedPlayer(player_url=url, source_url=url)
+        return [(urlsplit(url).hostname or "player", url)]
 
     from .guards import UrlGuard
     from .parser import AsmrlibParser
@@ -122,9 +141,53 @@ def resolve_player_url(url: str, *, timeout_seconds: float = 12.0) -> ResolvedPl
         raise PlayerResolveError("no_player_found", "page exposes no player embed")
 
     embeds.sort(key=lambda item: (item[0], item[1]))
-    best = embeds[0][1]
-    alternatives = tuple(u for _, u, _ in embeds[1:])
+    return [(label, media_url) for _, media_url, label in embeds]
+
+
+def resolve_player_sources(
+    url: str,
+    *,
+    health: Mapping[str, SourceHealth] | None = None,
+    preferred_url: str | None = None,
+    now: datetime | None = None,
+    timeout_seconds: float = 12.0,
+) -> list[RankedSource]:
+    """Resolve a post page to its candidates, ordered by measured health.
+
+    ``health`` is the persisted per-source record (keyed by
+    ``source_health.health_key``) and ``preferred_url`` the user's manual
+    choice for this post, which outranks the score.  Sources with no history
+    rank neutral, so a brand-new source is tried rather than buried.
+    """
+
+    return rank_sources(
+        resolve_player_candidates(url, timeout_seconds=timeout_seconds),
+        health=health,
+        preferred_url=preferred_url,
+        static_rank=_rank,
+        now=now,
+    )
+
+
+def resolve_player_url(url: str, *, timeout_seconds: float = 12.0) -> ResolvedPlayer:
+    """Fetch a post page and extract the bare player embed URLs.
+
+    Raises ``PlayerResolveError`` so callers can distinguish "already a
+    player URL" from "resolution failed, fall back to the page".
+    """
+
+    try:
+        urlsplit(url)
+    except ValueError as exc:
+        raise PlayerResolveError("invalid_url", str(exc)) from exc
+    if _is_player_host(url):
+        return ResolvedPlayer(player_url=url, source_url=url)
+
+    candidates = resolve_player_candidates(url, timeout_seconds=timeout_seconds)
+    best = candidates[0][1]
+    alternatives = tuple(candidate_url for _, candidate_url in candidates[1:])
     return ResolvedPlayer(player_url=best, source_url=url, alternatives=alternatives)
+
 
 
 class PlayerResolveError(RuntimeError):

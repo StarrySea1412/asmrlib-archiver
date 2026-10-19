@@ -286,6 +286,27 @@ class ArchiveDbTestCase(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(remaining, 0)
 
+    def test_media_health_ranks_recently_verified_candidates_first(self) -> None:
+        source_url = "https://asmrlib.com/posts/11111111111111111111111111111111"
+        weak_url = "https://cdn.example/media/weak.mp4"
+        healthy_url = "https://cdn.example/media/healthy.mp4"
+        self.db.add_seed(source_url)
+        self.db.replace_media_candidates(
+            source_url,
+            [
+                MediaCandidate(source_url, weak_url, label="weak"),
+                MediaCandidate(source_url, healthy_url, label="healthy"),
+            ],
+        )
+        self.db.record_media_health(source_url, weak_url, ok=False)
+        self.db.record_media_health(source_url, healthy_url, ok=True)
+        rows = self.db.list_media_for_item(source_url)
+        self.assertEqual([row["media_url"] for row in rows], [healthy_url, weak_url])
+        self.assertGreater(rows[0]["health_score"], 0)
+        self.assertLess(rows[1]["health_score"], 0)
+        self.assertEqual(rows[0]["success_count"], 1)
+        self.assertEqual(rows[1]["failure_count"], 1)
+
     def test_replace_media_preserves_downloaded_files(self) -> None:
         source_url = "https://asmrlib.com/posts/11111111111111111111111111111111"
         media_url = "https://asmrlib.com/media/kept.mp4"

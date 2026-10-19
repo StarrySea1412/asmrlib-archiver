@@ -24,11 +24,61 @@ class MediaRepo(DbConnection):
                     WHEN 'reference' THEN 2
                     ELSE 3
                   END,
+                  health_score DESC,
+                  CASE WHEN last_checked_at <> '' THEN last_checked_at END DESC,
                   id ASC
                 """,
                 (source_url,),
             )
         )
+
+    def list_media_urls(self) -> list[str]:
+        """Every media URL the archive has already recorded.
+
+        Drives the allowlist for the "save to library" endpoint: only hosts
+        the archive already references may be fetched, so the endpoint can
+        never be pointed at the LAN or an arbitrary internet host.
+        """
+        rows = self.conn.execute(
+            "SELECT media_url FROM media_candidates "
+            "WHERE media_url IS NOT NULL AND media_url != ''"
+        ).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
+    def record_media_health(
+        self, source_url: str, media_url: str, *, ok: bool
+    ) -> None:
+        """Persist one validated playback/download result for a candidate.
+
+        A successful direct-media save is strong evidence that this route works
+        on the current network. A rejected HTML response or a transport error
+        lowers its score, so future desktop source selection tries healthier
+        candidates first instead of repeating a known-bad first URL.
+        """
+        now = utc_now()
+        with self.conn:
+            if ok:
+                self.conn.execute(
+                    """
+                    UPDATE media_candidates
+                    SET success_count = success_count + 1,
+                        health_score = MIN(100, health_score * 0.70 + 30),
+                        last_checked_at = ?, updated_at = ?
+                    WHERE source_url = ? AND media_url = ?
+                    """,
+                    (now, now, source_url, media_url),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    UPDATE media_candidates
+                    SET failure_count = failure_count + 1,
+                        health_score = MAX(-100, health_score * 0.70 - 35),
+                        last_checked_at = ?, updated_at = ?
+                    WHERE source_url = ? AND media_url = ?
+                    """,
+                    (now, now, source_url, media_url),
+                )
 
     def media_counts_for_sources(
         self, source_urls: Iterable[str]
@@ -110,6 +160,29 @@ class MediaRepo(DbConnection):
         with self.conn:
             self.conn.execute("DELETE FROM media_candidates WHERE id = ?", (media_id,))
         return str(row["file_path"] or "")
+
+    def relink_media_file(self, media_id: int, file_path: str) -> bool:
+        """Point an existing record at a file that is already on disk.
+
+        The repair path for a record whose file was moved or renamed: the row
+        keeps its identity (and its label) while the path is corrected. The
+        caller is responsible for the file existing; this only refuses a path
+        that is not a regular file so a record can never be "repaired" onto
+        nothing. Returns False when the record no longer exists.
+        """
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"local_media_missing: {path}")
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                UPDATE media_candidates
+                SET file_path = ?, status = 'downloaded', error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (str(path), utc_now(), media_id),
+            )
+        return cursor.rowcount > 0
 
     def rename_media_label(self, media_id: int, label: str) -> None:
         """Set a human-readable label on a media row (e.g. '第1集 在线录制')."""

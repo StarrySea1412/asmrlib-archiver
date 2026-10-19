@@ -189,6 +189,19 @@ class ItemRepo(DbConnection):
             )
         )
 
+    def list_cover_urls(self) -> list[str]:
+        """Every stored cover URL — cheap enough to drive a host allowlist.
+
+        The viewer proxies covers through itself so they are fetched once for
+        every client instead of once per page load per browser. The proxy must
+        not be an open relay, so it only accepts hosts the archive already
+        references; this is how that set is built.
+        """
+        rows = self.conn.execute(
+            "SELECT cover FROM items WHERE cover IS NOT NULL AND cover != ''"
+        ).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
     def list_items_without_cover(self, limit: int) -> list[sqlite3.Row]:
         """Items that have never had a cover extracted, oldest first."""
         if limit <= 0:

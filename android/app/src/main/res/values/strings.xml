@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ASCII only, and the version rides in the label: the launcher name is
+         the one string a user cannot rename, and a Chinese label there makes
+         the app unsearchable on a keyboard that is not Chinese. Keep this in
+         step with versionName in build.gradle. -->
+    <string name="app_name">asmrlib-archiver v1.5</string>
+</resources>

@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 息屏播放. The three are a set, not alternatives:
+         · WAKE_LOCK is what MediaPlayer.setWakeMode(PARTIAL_WAKE_LOCK) needs
+           to keep the decoder fed once the screen is off;
+         · FOREGROUND_SERVICE keeps the process alive after the activity is
+           gone (background execution limits would kill it otherwise);
+         · FOREGROUND_SERVICE_MEDIA_PLAYBACK is mandatory from API 34, where a
+           declared service type is required for every foreground service. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- configChanges must cover the *resize* dimensions, not just rotation:
+         entering split-screen, dragging a freeform window, unfolding a
+         foldable or crossing a density bucket changes screenLayout /
+         smallestScreenSize / density, and an unlisted change recreates the
+         Activity — which kills the in-flight HLS worker threads and throws
+         away the WebView's restored history. -->
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true"
+        android:hardwareAccelerated="true"
+        android:resizeableActivity="true"
+        android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|layoutDirection|fontScale">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|layoutDirection|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The in-app player for a saved artifact. Not exported and carrying
+             no intent filter on purpose: the shell starts it explicitly with a
+             read grant on the provider URI, so the app never claims a global
+             handler for a media type it does not own. It exists because
+             nothing on a bare device resolves video/mp2t, which is exactly
+             what the in-app HLS saver writes. -->
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|layoutDirection|fontScale" />
+
+        <!-- Download management: a full-screen Activity that owns the list,
+             buttons, and progress for every saved artifact. Lives outside
+             MainActivity so the WebView's inline fullscreen (and any
+             PlayerActivity launched alongside it) does not have to share its
+             window with a floating entry icon or a panel that wants to live
+             on top of the picture. -->
+        <activity
+            android:name=".DownloadsActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|layoutDirection|fontScale" />
+
+        <!-- Framework-only FileProvider: the download center hands finished
+             downloads to ACTION_VIEW as content:// URIs, because the file://
+             URI DownloadManager reports would throw FileUriExposedException
+             on API 24+. Not exported; access is granted per-intent. -->
+        <!-- 息屏播放: audio-only playback with no surface, so the screen going
+             dark does not end it. The service type is declared here and passed
+             again to startForeground(); API 34 rejects the promotion if either
+             half is missing. Not exported: only this app may start it. -->
+        <service
+            android:name=".PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- 息屏播放 (online player): the WebView keeps its own playback, so
+             this service is a keep-alive, not a player — a foreground service
+             plus a partial wake lock that keep the process unfrozen and the
+             CPU awake while the screen is dark. Same type contract as
+             PlaybackService above; no extra permission is needed, the media
+             playback trio is already declared for this manifest. -->
+        <service
+            android:name=".WebAudioService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <provider
+            android:name=".DownloadFileProvider"
+            android:authorities="com.asmrlib.archiver.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

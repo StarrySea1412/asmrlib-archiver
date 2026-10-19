@@ -193,6 +193,23 @@ def section_block(
 
 # --------------------------------------------------------------------------- cinema primitives
 
+def local_cover(url: str) -> str:
+    """Route a remote cover through this server's own on-disk cache.
+
+    Covers live on third-party CDNs (``videothumbs.me`` / ``i1.wp.com`` for the
+    current archive) that appear in no allowlist the project keeps. The cover
+    Service Worker only caches hosts from ``allowed_domains``, so it never
+    cached a single one: every page load re-fetched 20-30 remote images at
+    roughly 200-1000 ms each, which is where the "slow" feeling came from.
+    Proxied, a cover is same-origin, fetched once for every client (desktop and
+    phone alike), and served immutable afterwards.
+    """
+    value = str(url or "").strip()
+    if not value.startswith(("http://", "https://")):
+        return value
+    return "/cover?u=" + quote(value, safe="")
+
+
 def _plate_index(title: str) -> int:
     """Return a stable, cheap palette index for cover-less items."""
     return sum(ord(ch) for ch in (title or "?")) % 8
@@ -219,7 +236,7 @@ def cinema_hero(
     if cover_url:
         media = (
             "<img class='cinema-hero-img' data-cover-img "
-            f"src='{_h(cover_url)}' alt='' loading='eager' "
+            f"src='{_h(local_cover(cover_url))}' alt='' loading='eager' "
             "fetchpriority='high' decoding='async'>"
             f"<div class='cinema-hero-fallback plate-{idx}' aria-hidden='true' hidden>"
             f"{_h(initial or title_text[:1] or '?')}</div>"
@@ -448,7 +465,7 @@ def cover_card(
         # A delegated error handler in assets.py swaps it for the static plate.
         thumb = (
             "<div class='cover-thumb'>"
-            f"<img class='cover-thumb-img' data-cover-img src='{_h(cover_url)}' "
+            f"<img class='cover-thumb-img' data-cover-img src='{_h(local_cover(cover_url))}' "
             "alt='' width='640' height='360' "
             f"loading='{_h(loading if loading in {'lazy', 'eager'} else 'lazy')}' "
             "decoding='async'>"

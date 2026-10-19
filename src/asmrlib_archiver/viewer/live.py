@@ -16,6 +16,7 @@ from .components import (
     detail_hero,
     detail_poster,
     empty_state,
+    local_cover,
     page_header,
     pill,
     pills,
@@ -23,6 +24,7 @@ from .components import (
     status_chip,
 )
 from .util import _h, _tag_slug
+from .page_shell import _page
 
 
 class LivePages:
@@ -175,7 +177,7 @@ class LivePages:
                 ),
             ),
         ]
-        return self._page(title, body)
+        return _page(title, body)
 
     def _render_browse(self, query: dict[str, list[str]]) -> str:
         """Return a non-blocking shell; live cards arrive from /api/live-feed."""
@@ -189,7 +191,7 @@ class LivePages:
                 raw_url or self._build_browse_url(page_n)
             )
         except ValueError as exc:
-            return self._page(
+            return _page(
                 "站点最新",
                 [
                     empty_state(
@@ -408,7 +410,7 @@ class LivePages:
                     self._build_tag_page_url(slug, page_n)
                 )
         except ValueError as exc:
-            return self._page(
+            return _page(
                 "标签发现",
                 [
                     empty_state(
@@ -465,7 +467,7 @@ class LivePages:
                     kicker="EXPLORE",
                 )
             )
-        return self._page("标签浏览", body)
+        return _page("标签浏览", body)
 
     def _explore_post_cards(self, post_urls: list[str]) -> str:
         cards: list[str] = []
@@ -505,7 +507,7 @@ class LivePages:
             if "/posts/" not in urlparse(source_url).path:
                 raise ValueError("not_a_post_url")
         except ValueError as exc:
-            return self._page(
+            return _page(
                 "预览",
                 [
                     empty_state(
@@ -527,7 +529,7 @@ class LivePages:
             parser, fetch_result = self._fetch_live(source_url)
             parsed = parser.parse(source_url, fetch_result.text)
         except Exception as exc:  # noqa: BLE001
-            return self._page(
+            return _page(
                 "预览",
                 [
                     empty_state(
@@ -542,12 +544,13 @@ class LivePages:
 
         title = parsed.title or source_url
         if parsed.cover:
+            live_cover = local_cover(parsed.cover)
             poster_inner = (
                 f"<div class='detail-poster-img' "
-                f"style='background-image: url({_h(parsed.cover)})'></div>"
+                f"style='background-image: url({_h(live_cover)})'></div>"
             )
             backdrop = detail_backdrop(
-                f"background-image: url({_h(parsed.cover)})"
+                f"background-image: url({_h(live_cover)})"
             )
         else:
             plate_grad = self._plate_gradient(1)
@@ -643,7 +646,7 @@ class LivePages:
                 )
             )
 
-        return self._page(title, body)
+        return _page(title, body)
 
     # --------------------------------------------------------------- cards
 

@@ -28,10 +28,50 @@ CREATE TABLE IF NOT EXISTS media_candidates (
   status TEXT NOT NULL DEFAULT 'pending',
   file_path TEXT DEFAULT '',
   error TEXT DEFAULT '',
+  health_score REAL NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(source_url, media_url),
   FOREIGN KEY(source_url) REFERENCES items(source_url)
+);
+
+-- Playback-line health, keyed on a hash of the *resolved source URL* rather
+-- than on the display label: the site renames server buttons ("BI" -> "线路1")
+-- while the embed URL stays the same, so a label key would silently forget
+-- every measurement. This is what lets a source that worked yesterday but is
+-- dead today stop being tried first.
+--
+-- Deliberately not a set of columns on media_candidates: player embeds are
+-- resolved at playback time and may have no item row at all, and
+-- replace_media_candidates() deletes rows on every re-crawl, which would take
+-- the accumulated history with it.
+CREATE TABLE IF NOT EXISTS source_health (
+  source_key TEXT PRIMARY KEY,
+  source_url TEXT NOT NULL DEFAULT '',
+  last_success_at TEXT DEFAULT '',
+  last_failure_at TEXT DEFAULT '',
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  -- First-byte / first-segment latency of the last successful start, in ms.
+  -- -1 means "never measured" and is scored as neutral, not as slow.
+  latency_ms INTEGER NOT NULL DEFAULT -1,
+  last_error TEXT DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
+-- A manual source choice the user made for one post. Kept per post (not per
+-- source) because "use upn.one for this episode" is what the user actually
+-- expressed; it must outrank the computed score and survive a restart.
+CREATE TABLE IF NOT EXISTS source_preference (
+  item_url TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  source_url TEXT NOT NULL DEFAULT '',
+  chosen_at TEXT NOT NULL,
+  PRIMARY KEY (item_url, source_key)
 );
 
 CREATE TABLE IF NOT EXISTS tag_pages (
@@ -119,7 +159,32 @@ class DbConnection:
     def init_schema(self) -> None:
         self.conn.executescript(SCHEMA)
         self._migrate_items_cover()
+        self._migrate_media_health()
         self.conn.commit()
+
+    def _migrate_media_health(self) -> None:
+        """Add durable line-health fields to existing media tables.
+
+        The archive used to retain only a latest status, so a frequently
+        failing player URL could remain first forever.  These fields let every
+        client rank candidates from actual successful/failed attempts while
+        keeping legacy databases upgrade-safe.
+        """
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(media_candidates)")
+        }
+        additions = (
+            ("health_score", "REAL NOT NULL DEFAULT 0"),
+            ("success_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_checked_at", "TEXT DEFAULT ''"),
+        )
+        for name, definition in additions:
+            if name not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE media_candidates ADD COLUMN {name} {definition}"
+                )
 
     def _migrate_items_cover(self) -> None:
         """Add the cover column to legacy items tables.

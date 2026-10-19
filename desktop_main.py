@@ -166,9 +166,14 @@ class DesktopApi:
         self._base_url = base_url.rstrip("/")
         runtime_config = config or getattr(viewer, "config", None)
         self._runtime_config = runtime_config
+        self._viewer = viewer
         self._external_policy = policy_from_config(runtime_config)
         self._mini = None
         self._online_shield = None
+        # In-flight playback watchers, as ``(stop_event, thread)``. They write
+        # through the viewer's sqlite connection, so shutdown has to join them
+        # before that connection closes (see _stop_playback_watchers).
+        self._watchers: list[tuple[threading.Event, threading.Thread]] = []
         self._lock = threading.Lock()
 
     def open_mini_player(self, path: str) -> dict:
@@ -223,10 +228,10 @@ class DesktopApi:
         """Open an allow-listed player in the guarded WebView2 window.
 
         Post pages on the site domain are first resolved to their bare
-        player embed URL so the sandbox window shows a pure video page —
-        no site header, related grid or ad iframes. Resolution is
-        best-effort: if it fails the original page loads under the shield,
-        which still strips ads/popups.
+        player embed URLs and ordered by *measured* health, so a source that
+        has been failing stops being tried first. Resolution is best-effort:
+        if it fails the original page loads under the shield, which still
+        strips ads/popups.
 
         The WebView2 integration is optional at runtime. If it cannot be
         initialized (for example in plain ``serve`` mode or on a machine
@@ -240,45 +245,62 @@ class DesktopApi:
             code = str(getattr(exc, "code", "invalid_url"))
             return {"ok": False, "code": code, "error": str(exc)}
 
-        # Sandboxed pure-video mode: swap a post page for its player embed.
+        # Sandboxed pure-video mode: swap a post page for its player embeds,
+        # best-first by measured health (a manual choice outranks the score).
         resolved_note = ""
+        candidates: list[str] = []
         if self._is_post_page(target):
-            try:
-                from asmrlib_archiver.player_resolver import resolve_player_url
-
-                resolved = resolve_player_url(target)
-                validated = self._external_policy.validate(resolved.player_url)
-                target = validated
+            candidates = self._ranked_player_urls(target)
+            if candidates:
                 resolved_note = "sandboxed-player"
-            except Exception:
-                # Fall back to loading the post page under the shield.
-                pass
+        if not candidates:
+            candidates = [target]
 
-        try:
-            from asmrlib_archiver.online_shield import GuardedWebViewPlayer
+        # Media URLs already sniffed by the reused shield window. Only a *new*
+        # media request may count as this attempt's success, otherwise opening
+        # the next source would inherit the previous source's evidence.
+        known_media = self._sniffed_media()
+        result: dict = {"ok": False, "code": "open_failed", "error": ""}
 
-            with self._lock:
-                if self._online_shield is None:
-                    self._online_shield = GuardedWebViewPlayer(
-                        self._runtime_config,
-                        title="ASMR 收藏馆 · 安全播放",
-                        save_dir=app_root() / "data" / "online-saves",
-                    )
-                result = self._online_shield.open(target)
+        for candidate in candidates:
+            try:
+                from asmrlib_archiver.online_shield import GuardedWebViewPlayer
+
+                with self._lock:
+                    if self._online_shield is None:
+                        self._online_shield = GuardedWebViewPlayer(
+                            self._runtime_config,
+                            title="ASMR 收藏馆 · 安全播放",
+                            save_dir=app_root() / "data" / "online-saves",
+                        )
+                    result = self._online_shield.open(candidate)
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "code": "shield_unavailable",
+                    "error": str(exc),
+                }
             if result.get("ok"):
                 if resolved_note:
                     result["mode"] = resolved_note
+                # Success is never assumed here: the watcher only credits this
+                # source once the player actually fetched media.
+                self._watch_for_playback(candidate, known_media=known_media)
                 return result
-        except Exception as exc:
-            result = {
-                "ok": False,
-                "code": "shield_unavailable",
-                "error": str(exc),
-            }
+            code = str(result.get("code") or "")
+            if code.startswith("blocked") or code in {"invalid_url", "host_not_allowed"}:
+                # The source itself was refused, so record it and try the next
+                # candidate instead of sending the user to a dead first pick.
+                self._record_source_outcome(candidate, ok=False, error=code)
+                continue
+            # Anything else (no WebView2, window creation failed) is an
+            # environment problem, not this source's fault: stop walking so a
+            # broken runtime cannot mark every source as dead.
+            break
 
         # A plain HTTP viewer and a failed WebView2 initialization both keep
         # the user journey usable through the OS browser.
-        fallback = self.open_external_url(target)
+        fallback = self.open_external_url(candidates[0])
         if fallback.get("ok"):
             fallback.update(
                 {
@@ -288,6 +310,155 @@ class DesktopApi:
                 }
             )
         return fallback
+
+    # --------------------------------------------------- playback health
+
+    def _health_db(self):
+        """The archive DB behind the viewer, or ``None`` in bare serve mode."""
+
+        return getattr(self._viewer, "db", None)
+
+    def _ranked_player_urls(self, post_url: str) -> list[str]:
+        """Player embed URLs for a post, best-first by measured health."""
+
+        try:
+            from asmrlib_archiver.player_resolver import resolve_player_candidates
+            from asmrlib_archiver.source_health import rank_sources
+
+            pairs = [
+                (str(label), str(candidate))
+                for label, candidate in resolve_player_candidates(post_url)
+            ]
+        except Exception:
+            return []
+        if not pairs:
+            return []
+
+        order = {url: index for index, (_label, url) in enumerate(pairs)}
+        health: dict = {}
+        preferred = ""
+        db = self._health_db()
+        if db is not None:
+            try:
+                health = db.get_source_health([url for _label, url in pairs])
+                preferred = db.get_source_preference(post_url)
+            except Exception:  # noqa: BLE001 - health is telemetry, never fatal
+                health, preferred = {}, {}
+
+        ranked = rank_sources(
+            pairs,
+            health=health,
+            preferred_url=preferred,
+            static_rank=lambda _label, url: order.get(url, 9),
+        )
+        validated: list[str] = []
+        for source in ranked:
+            try:
+                validated.append(self._external_policy.validate(source.url))
+            except Exception:  # noqa: BLE001 - a refused candidate is skipped
+                continue
+        return validated
+
+    def _sniffed_media(self) -> set[str]:
+        binding = getattr(self._online_shield, "binding", None)
+        return set(getattr(binding, "sniffed_media", None) or ())
+
+    def _record_source_outcome(
+        self, url: str, *, ok: bool, latency_ms: int = 0, error: str = ""
+    ) -> None:
+        """Persist one real playback attempt (best-effort, never raises)."""
+
+        db = self._health_db()
+        if db is None or not url:
+            return
+        try:
+            from asmrlib_archiver.source_health import PlaybackOutcome
+
+            db.record_playback_outcome(
+                url,
+                PlaybackOutcome.PLAYING if ok else PlaybackOutcome.FAILED,
+                int(latency_ms),
+                str(error),
+            )
+        except Exception:  # noqa: BLE001 - health telemetry never breaks playback
+            return
+
+    def _watch_for_playback(
+        self,
+        url: str,
+        *,
+        known_media: set[str] | None = None,
+        timeout_seconds: float = 25.0,
+        poll_seconds: float = 0.4,
+    ) -> threading.Thread | None:
+        """Record a success only once the player actually fetched media.
+
+        The shield already observes every media request the player makes, so
+        the first *new* manifest/segment URL is honest evidence that playback
+        started — and its arrival time is a real first-byte/first-segment
+        latency. A window that merely opened, or a page that never fetched
+        media, records nothing.
+
+        Returns the watcher thread (``None`` when there is no DB to write to).
+        The write goes through the caller's sqlite connection, so anything
+        that later closes that connection — a test's teardown, the app's
+        shutdown — must join this thread first; closing the connection while
+        the write is in flight is an access violation inside sqlite, not a
+        Python exception. ``_close`` does that for the app; tests join the
+        returned thread themselves.
+        """
+
+        if self._health_db() is None:
+            return None
+        seen = set(known_media or ())
+        started = time.monotonic()
+        stop = threading.Event()
+
+        def worker() -> None:
+            deadline = started + max(0.0, timeout_seconds)
+            while not stop.is_set() and time.monotonic() < deadline:
+                fresh = self._sniffed_media() - seen
+                if fresh:
+                    self._record_source_outcome(
+                        url,
+                        ok=True,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                    )
+                    return
+                # Event-aware wait, not time.sleep: shutdown sets the event and
+                # gets the thread back immediately instead of after one poll.
+                stop.wait(max(0.01, poll_seconds))
+
+        watcher = threading.Thread(
+            target=worker, daemon=True, name="asmrlib-playback-watch"
+        )
+        watcher.start()
+        with self._lock:
+            self._watchers = [
+                entry for entry in self._watchers if entry[1].is_alive()
+            ]
+            self._watchers.append((stop, watcher))
+        return watcher
+
+    def _stop_playback_watchers(self, timeout_seconds: float = 2.0) -> None:
+        """Wait for in-flight health writes before the DB connection closes.
+
+        ``viewer.close()`` closes the shared sqlite connection. A watcher
+        mid-write at that moment does not raise — it takes the whole process
+        down with an access violation, so nothing gets a chance to report it.
+        Bounded, because a wedged watcher must not hang app exit forever; the
+        stop event is set for every watcher before any join, so they all wake
+        from the same poll and unwind together.
+        """
+
+        with self._lock:
+            pending, self._watchers = self._watchers, []
+        for stop, _ in pending:
+            stop.set()
+        for _, watcher in pending:
+            if watcher.is_alive():
+                with contextlib.suppress(Exception):
+                    watcher.join(timeout_seconds)
 
     @staticmethod
     def _is_post_page(url: str) -> bool:
@@ -314,6 +485,9 @@ class DesktopApi:
     def _close(self) -> None:
         """Close child windows owned by the desktop bridge."""
 
+        # Before the viewer (and its sqlite connection) is closed: a watcher
+        # still writing at that point crashes the process inside sqlite.
+        self._stop_playback_watchers()
         self._close_online_player()
 
     def open_external_url(self, url: str) -> dict:
@@ -393,7 +567,9 @@ def main() -> int:
         return 1
 
     base = f"http://{host}:{port}"
-    api = DesktopApi(base, config=config)
+    # The viewer is passed in so the bridge can persist measured playback
+    # health for each online source (see open_online_player).
+    api = DesktopApi(base, viewer=viewer, config=config)
     webview.create_window(
         "ASMR 收藏馆",
         url=f"{base}/",

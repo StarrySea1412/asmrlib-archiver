@@ -1,34 +1,25 @@
 from __future__ import annotations
 
-import re
-import unicodedata
 from dataclasses import dataclass
-from urllib.parse import quote, unquote_to_bytes, urldefrag, urljoin, urlparse, urlunparse
+from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 
+from .errors import BlockedRedirect, BlockedUrl, GuardError
 from .security_lists import AD_DOMAIN_ALIASES
 from .security_lists import BLOCKED_HOSTS as DEFAULT_AD_DOMAINS
+from .sites import SiteRegistry, default_registry
 
 # NOTE: DEFAULT_AD_DOMAINS and AD_DOMAIN_ALIASES are imported above from
 # security_lists.py, the single source of truth shared with online_shield.py
 # and viewer/player_guard.py. Edit the tables there, not here; existing
 # importers of this module keep working unchanged.
-
-_TAG_PATH_RE = re.compile(r"^/tags/([^/]+)/?$")
-_POST_PATH_RE = re.compile(r"^/posts/([0-9a-fA-F]{32})/?$")
-_TAG_PAGE_QUERY_RE = re.compile(r"^page=([1-9][0-9]*)$")
-_INVALID_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
-
-
-class GuardError(RuntimeError):
-    pass
-
-
-class BlockedUrl(GuardError):
-    pass
-
-
-class BlockedRedirect(GuardError):
-    pass
+#
+# NOTE: 站点专属的 URL 语法（路径形状、查询串、转义规则）在 sites/ 包里，由
+# SiteRegistry 路由。这个模块只负责信任边界与 URL 规范化，不再内联任何站点
+# 知识。依赖方向是单向的 guards -> sites：异常类型住在 errors.py（无内部依赖），
+# 所以两边都能引用同一组类而不会成环。
+#
+# GuardError / BlockedUrl / BlockedRedirect 在这里原样再导出，现有导入点
+# （downloader.py、http_client.py、parser.py、services/*、tests/*）无需改动。
 
 
 @dataclass(frozen=True)
@@ -46,7 +37,9 @@ class UrlGuard:
         allowed_media_domains: list[str] | None = None,
         allow_external_media: bool = False,
         ad_keywords: list[str] | None = None,
+        registry: SiteRegistry | None = None,
     ) -> None:
+        self.registry = default_registry() if registry is None else registry
         self.allowed_domains = [self._normalize_host(domain) for domain in allowed_domains]
         self.allow_subdomains = allow_subdomains
         self.allow_external_media = allow_external_media
@@ -141,15 +134,11 @@ class UrlGuard:
 
     def canonical_tag_url(self, url: str, base_url: str | None = None) -> str:
         normalized = self.assert_page_allowed(url, base_url)
-        parsed = urlparse(normalized)
-        if parsed.params or parsed.query:
-            raise BlockedUrl(f"invalid_tag_url_query: {normalized}")
-        match = _TAG_PATH_RE.fullmatch(parsed.path)
-        if not match:
+        adapter = self.registry.for_url(normalized)
+        canonical = adapter.canonical_tag_url(normalized) if adapter is not None else None
+        if canonical is None:
             raise BlockedUrl(f"invalid_tag_url_path: {normalized}")
-        slug = self._canonical_path_segment(match.group(1), "tag slug")
-        path = f"/tags/{quote(slug, safe='-._~')}"
-        return urlunparse(parsed._replace(path=path, params="", query="", fragment=""))
+        return canonical
 
     def is_tag_url(self, url: str, base_url: str | None = None) -> bool:
         try:
@@ -160,16 +149,11 @@ class UrlGuard:
 
     def canonical_post_url(self, url: str, base_url: str | None = None) -> str:
         normalized = self.assert_page_allowed(url, base_url)
-        parsed = urlparse(normalized)
-        if parsed.params or parsed.query:
-            raise BlockedUrl(f"invalid_post_url_query: {normalized}")
-        match = _POST_PATH_RE.fullmatch(parsed.path)
-        if not match:
+        adapter = self.registry.for_url(normalized)
+        canonical = adapter.canonical_post_url(normalized) if adapter is not None else None
+        if canonical is None:
             raise BlockedUrl(f"invalid_post_url_path: {normalized}")
-        post_id = match.group(1).lower()
-        return urlunparse(
-            parsed._replace(path=f"/posts/{post_id}", params="", query="", fragment="")
-        )
+        return canonical
 
     def is_post_url(self, url: str, base_url: str | None = None) -> bool:
         try:
@@ -196,16 +180,15 @@ class UrlGuard:
 
         if not parsed.query:
             return canonical_tag
-        match = _TAG_PAGE_QUERY_RE.fullmatch(parsed.query)
-        if not match:
+        adapter = self.registry.for_url(canonical_tag)
+        page_url = (
+            adapter.canonical_tag_page_url(normalized, canonical_tag)
+            if adapter is not None
+            else None
+        )
+        if page_url is None:
             raise BlockedUrl(f"invalid_tag_page_query: {normalized}")
-        page_text = match.group(1)
-        if len(page_text) > 18:
-            raise BlockedUrl(f"invalid_tag_page_query: {normalized}")
-        page_number = int(page_text)
-        if page_number == 1:
-            return canonical_tag
-        return f"{canonical_tag}?page={page_number}"
+        return page_url
 
     def is_tag_page_url(self, url: str, tag_url: str) -> bool:
         try:
@@ -276,22 +259,3 @@ class UrlGuard:
             return cls._normalize_host(candidate)
         except BlockedUrl:
             return None
-
-    @staticmethod
-    def _canonical_path_segment(segment: str, label: str) -> str:
-        if _INVALID_PERCENT_ESCAPE_RE.search(segment):
-            raise BlockedUrl(f"invalid_{label.replace(' ', '_')}: malformed percent escape")
-        try:
-            decoded = unquote_to_bytes(segment).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise BlockedUrl(f"invalid_{label.replace(' ', '_')}: invalid UTF-8") from exc
-        decoded = unicodedata.normalize("NFC", decoded)
-        if (
-            not decoded
-            or decoded in {".", ".."}
-            or "/" in decoded
-            or "\\" in decoded
-            or any(ord(character) <= 0x1F or ord(character) == 0x7F for character in decoded)
-        ):
-            raise BlockedUrl(f"invalid_{label.replace(' ', '_')}: unsafe path segment")
-        return decoded

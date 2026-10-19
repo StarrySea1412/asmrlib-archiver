@@ -19,16 +19,206 @@ from .assets import (
     _UI_JS,
 )
 
+# Phone-side network suitability probe. The server answers /api/network-check
+# with its own upstream reachability (site + player hosts, TCP RTT); this
+# script adds the phone↔server RTT plus connection hints (effectiveType,
+# saveData) and shows a fixed banner whenever the combination is not "ok".
+# "ok" stays silent — the banner is only a warning surface.
+_NETWORK_JS = r"""
+(function () {
+  'use strict';
+  var STORE_KEY = 'asmrlib-net-banner';
+  var conn = navigator.connection || navigator.mozConnection ||
+    navigator.webkitConnection || {};
+
+  function now() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function measure(url) {
+    var t0 = now();
+    return fetch(url, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (data) {
+      data.client_rtt_ms = Math.round(now() - t0);
+      return data;
+    });
+  }
+
+  function evaluate(data) {
+    var reasons = [];
+    var level = 'ok';
+    // A "pending" payload means the server has no upstream data yet (its
+    // background probe is still running). Upstream judgment waits for the
+    // next page load; the phone-side RTT below is already valid.
+    var upstreamUnknown = data.ok === null || data.ok === undefined;
+    var upstream = data.upstream || [];
+    var siteHost = data.site_host || '';
+    var reachable = [];
+    var siteEntry = null;
+    var tlsTried = 0;
+    var tlsFailed = 0;
+    for (var i = 0; i < upstream.length; i++) {
+      if (siteHost && upstream[i].host === siteHost) siteEntry = upstream[i];
+      if (upstream[i].ok) {
+        reachable.push(upstream[i]);
+        // tls_ok is absent on older payloads — count only what we know.
+        if (typeof upstream[i].tls_ok === 'boolean') {
+          tlsTried++;
+          if (!upstream[i].tls_ok) tlsFailed++;
+        }
+      }
+    }
+    if (!upstreamUnknown && upstream.length && !reachable.length) {
+      reasons.push('电脑当前无法访问站点与播放器域名（在线播放 / 实时发现会失败，本地收藏不受影响）');
+      level = 'bad';
+    } else if (siteEntry && siteEntry.ok && siteEntry.tls_ok === false) {
+      // Ports answer but the site's TLS handshake is torn down: the classic
+      // "needs a proxy" network. Without this the banner stayed silent while
+      // every crawl died with SSL: UNEXPECTED_EOF_WHILE_READING.
+      reasons.push('电脑能连通站点端口，但 HTTPS 握手被中断（网络层干扰，需要代理/梯子；'
+        + '实时发现、归档与在线播放会失败，本地收藏不受影响）');
+      level = 'bad';
+    } else if (tlsFailed) {
+      reasons.push('电脑到部分播放器域名（' + tlsFailed + '/' + tlsTried +
+        '）的 HTTPS 握手被中断，这些源可能播不了');
+      level = 'warn';
+    } else if (!upstreamUnknown && data.best_rtt_ms > 2000) {
+      reasons.push('电脑到站点延迟高（' + data.best_rtt_ms + 'ms）');
+      level = 'warn';
+    }
+    var rtt = data.client_rtt_ms || 0;
+    if (rtt > 800) {
+      reasons.push('手机到收藏馆延迟高（' + rtt + 'ms）');
+      level = 'bad';
+    } else if (rtt > 350) {
+      reasons.push('手机到收藏馆延迟偏高（' + rtt + 'ms）');
+      if (level === 'ok') level = 'warn';
+    }
+    if (conn.saveData) {
+      reasons.push('已开启省流模式，媒体可能被浏览器拦截');
+      if (level === 'ok') level = 'warn';
+    }
+    var eff = String(conn.effectiveType || '');
+    if (eff === 'slow-2g' || eff === '2g') {
+      reasons.push('移动网络很慢（' + eff + '）');
+      level = 'bad';
+    }
+    return { level: level, reasons: reasons, rtt: rtt, eff: eff };
+  }
+
+  function ensureBanner() {
+    var el = document.getElementById('net-banner');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'net-banner';
+    el.className = 'net-banner';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.innerHTML =
+      '<span class="net-dot" aria-hidden="true"></span>' +
+      '<span class="net-banner-text">' +
+      '<strong class="net-banner-title"></strong>' +
+      '<span class="net-banner-sub"></span></span>' +
+      '<button type="button" class="net-retest">重测</button>' +
+      '<button type="button" class="net-close" aria-label="关闭提示">✕</button>';
+    document.body.appendChild(el);
+    el.querySelector('.net-retest').addEventListener('click', function () {
+      try { sessionStorage.removeItem(STORE_KEY); } catch (e) {}
+      el.classList.remove('is-on');
+      run(true);
+    });
+    el.querySelector('.net-close').addEventListener('click', function () {
+      el.classList.remove('is-on');
+      try { sessionStorage.setItem(STORE_KEY, el.getAttribute('data-level') || ''); }
+      catch (e) {}
+    });
+    return el;
+  }
+
+  function render(result) {
+    var el = ensureBanner();
+    el.setAttribute('data-level', result.level);
+    var titleEl = el.querySelector('.net-banner-title');
+    var subEl = el.querySelector('.net-banner-sub');
+    if (result.level === 'bad') {
+      el.className = 'net-banner is-on is-bad';
+      titleEl.textContent = '网络不适合，建议调整';
+    } else if (result.level === 'warn') {
+      el.className = 'net-banner is-on is-warn';
+      titleEl.textContent = '网络状况一般';
+    } else {
+      el.className = 'net-banner';
+      return;
+    }
+    var dismissed = '';
+    try { dismissed = sessionStorage.getItem(STORE_KEY) || ''; } catch (e) {}
+    if (dismissed === 'bad' && result.level !== 'bad') return;
+    if (dismissed === result.level) return;
+    subEl.textContent = result.reasons.join('；') +
+      '。' + (result.eff ? '网络类型 ' + result.eff + '。' : '') + '点击「重测」可再次检测。';
+  }
+
+  var running = false;
+  function run(force) {
+    if (running || !window.fetch) return;
+    running = true;
+    var tries = [measure('/api/network-check?r=' + Date.now())];
+    tries.push(tries[0].then(function () {
+      return measure('/api/network-check?r=' + (Date.now() + 1));
+    }).catch(function () { return null; }));
+    Promise.all(tries).then(function (results) {
+      running = false;
+      var data = results[0];
+      if (!data) return;
+      var second = results[1];
+      if (second && second.client_rtt_ms < data.client_rtt_ms) {
+        data.client_rtt_ms = second.client_rtt_ms;
+      }
+      render(evaluate(data));
+    }).catch(function () { running = false; });
+  }
+
+  function init() {
+    // Only online pages should announce network suitability. The archive
+    // pages (/, /posts, /post/..., /author, /recordings, /sync-status) show
+    // local content that does not need any network at all; having a red
+    // banner shout over the cinema hero just because the phone cannot reach
+    // asmrlib.com is misleading. Without this guard the banner floated over
+    // /posts and / on the desktop viewer too.
+    var path = (location && location.pathname) || '/';
+    var online =
+      /^\/(?:browse|explore|live|api\/live-feed)(?:\/|$)/.test(path) ||
+      /^\/(?:play|watch)(?:\?|$|\/)/.test(path) && !/^\/watch-local/.test(path);
+    if (!online) return;
+    run(false);
+  }
+  // Visual QA hook: render(evaluate({...})) lets a test driver show any
+  // banner state without cutting the machine off the network.
+  window.__asmrlibNetBannerPreview = render;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+"""
+
 _APP_JS_EXTRA = r"""
 (function () {
   'use strict';
+
+  // APK shell marks its WebView user agent with this suffix; JS uses it to
+  // pick the right hand-off copy (in-app shielded player vs system browser).
+  window.__asmrlibInApk = navigator.userAgent.indexOf('asmrlib-android') !== -1;
 
   function currentNav() {
     var path = location.pathname || '/';
     var key = 'home';
     if (path.indexOf('/browse') === 0 || path.indexOf('/explore') === 0) key = 'discover';
     else if (path.indexOf('/posts') === 0 || path.indexOf('/post/') === 0 || path.indexOf('/author') === 0) key = 'library';
-    else if (path.indexOf('/recordings') === 0) key = 'local';
+    else if (path.indexOf('/recordings') === 0 || path.indexOf('/storage') === 0) key = 'local';
     var links = document.querySelectorAll('#top-nav a[data-nav]');
     for (var i = 0; i < links.length; i++) {
       if (links[i].getAttribute('data-nav') === key) {
@@ -234,7 +424,7 @@ _APP_JS_EXTRA = r"""
 
 APP_CSS = _CSS
 APP_JS = "\n".join(
-    (_LOADING_JS, _MINI_PLAYER_JS, _DESKTOP_ACTIONS_JS, _UI_JS, _APP_JS_EXTRA)
+    (_LOADING_JS, _MINI_PLAYER_JS, _DESKTOP_ACTIONS_JS, _UI_JS, _APP_JS_EXTRA, _NETWORK_JS)
 )
 UI_VERSION = hashlib.sha256((APP_CSS + APP_JS).encode("utf-8")).hexdigest()[:12]
 
@@ -330,6 +520,49 @@ self.addEventListener('fetch', event => {{
         cache_control="no-cache",
         extra_headers=(("Service-Worker-Allowed", "/"),),
     )
+
+
+def app_icon_svg() -> str:
+    """App icon (also the PWA manifest icon): brand bars on a gradient tile."""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0" stop-color="#7aa2ff"/><stop offset="1" stop-color="#a78bfa"/>'
+        "</linearGradient></defs>"
+        '<rect width="512" height="512" rx="112" fill="#0a0d14"/>'
+        '<rect x="1.5" y="1.5" width="509" height="509" rx="110.5" fill="none" '
+        'stroke="url(#g)" stroke-width="3" opacity=".55"/>'
+        '<g fill="url(#g)">'
+        '<rect x="128" y="216" width="52" height="96" rx="24"/>'
+        '<rect x="212" y="144" width="52" height="224" rx="24"/>'
+        '<rect x="296" y="184" width="52" height="144" rx="24"/>'
+        '<rect x="380" y="112" width="52" height="288" rx="24"/>'
+        "</g></svg>"
+    )
+
+
+def app_manifest() -> dict:
+    """Installable web-app manifest — 「添加到主屏幕」 without the APK."""
+    return {
+        "name": "ASMR 收藏馆",
+        "short_name": "收藏馆",
+        "description": "本地 ASMR 归档收藏馆（只读阅览 + 受控在线播放）",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait-primary",
+        "background_color": "#07090d",
+        "theme_color": "#07090d",
+        "lang": "zh-CN",
+        "icons": [
+            {
+                "src": "/ui/icon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any",
+            }
+        ],
+    }
 
 
 __all__ = [

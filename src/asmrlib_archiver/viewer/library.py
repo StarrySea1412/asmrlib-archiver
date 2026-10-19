@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+from ..local_audit import (
+    STATE_FILE_MISSING,
+    STATE_LOCAL_READY,
+    STATE_ORPHAN_FILE,
+    LocalAuditReport,
+    OrphanFile,
+    audit_local_media,
+    servable_path,
+)
 from .assets import PAGE_SIZE
 from .components import (
     action_btn,
@@ -20,6 +31,7 @@ from .components import (
     detail_hero,
     detail_poster,
     empty_state,
+    local_cover,
     meta_strip,
     page_header,
     pill,
@@ -31,6 +43,7 @@ from .components import (
     pagination as pagination_html,
 )
 from .preview import VIDEO_PREVIEW_EXTS
+from .page_shell import _page
 from .util import (
     _h,
     _human_size,
@@ -325,7 +338,7 @@ class LibraryPages:
                 )
             )
 
-        return self._page("收藏馆", body)
+        return _page("收藏馆", body)
 
     def _render_list(self, query: dict[str, list[str]]) -> str:
         q = (query.get("q") or [""])[0].strip()
@@ -356,7 +369,7 @@ class LibraryPages:
             self._post_cards(rows),
             self._pagination("/posts", page, total, q=q, tag=tag),
         ]
-        return self._page("收藏", body)
+        return _page("收藏", body)
 
     def _render_author(self, query: dict[str, list[str]]) -> str:
         name = (query.get("name") or [""])[0].strip()
@@ -384,7 +397,7 @@ class LibraryPages:
                 if author_chips
                 else "<p class='muted empty-inline'>暂无作者。</p>",
             ]
-            return self._page("作者", body)
+            return _page("作者", body)
 
         offset = (page - 1) * PAGE_SIZE
         total = self.db.count_items_by_author(name)
@@ -395,12 +408,12 @@ class LibraryPages:
             self._post_cards(rows),
             self._pagination("/author", page, total, name=name),
         ]
-        return self._page(name, body)
+        return _page(name, body)
 
     def _render_detail(self, source_url: str) -> str:
         row = self.db.get_item(source_url)
         if row is None:
-            return self._page(
+            return _page(
                 "未找到",
                 [
                     empty_state(
@@ -423,15 +436,16 @@ class LibraryPages:
             cover_url = self._lazy_cover(source_url, "")
 
         if cover_url:
+            cover_src = local_cover(cover_url)
             poster_inner = (
                 f"<img class='detail-poster-img' data-cover-img "
-                f"src='{_h(cover_url)}' alt='' loading='eager' decoding='async' "
-                f"style='background-image: url({_h(cover_url)})'>"
+                f"src='{_h(cover_src)}' alt='' loading='eager' decoding='async' "
+                f"style='background-image: url({_h(cover_src)})'>"
                 "<div class='detail-poster-fallback plate-0' "
                 f"aria-hidden='true' hidden>{_h((title[:1] or '?').upper())}</div>"
             )
             backdrop = detail_backdrop(
-                f"background-image: url({_h(cover_url)})"
+                f"background-image: url({_h(cover_src)})"
             )
         else:
             plate_grad = self._plate_gradient(0)
@@ -684,8 +698,9 @@ class LibraryPages:
                     trailing=status_chip("自动拦截"),
                     extra_class="detail-panel source-panel",
                     hint=(
-                        "桌面版“在线播放”会自动拦截弹窗与广告跳转；"
-                        "无桌面桥时回退系统浏览器。需要原始地址可点“原链”。"
+                        "在线播放会在应用内打开纯净播放器（iframe 沙箱拦截弹窗与"
+                        "广告跳转，APK 内另有白名单丢弃未知子资源）；"
+                        "桌面版使用受控安全播放器。需要原始地址可点“原链”。"
                     ),
                 )
             )
@@ -855,7 +870,7 @@ class LibraryPages:
             "if(e.key==='Escape')closePreviewLightbox();});"
             "</script>"
         )
-        return self._page(title, body)
+        return _page(title, body)
 
     # ---------------------------------------------------------- live explore
 
@@ -885,6 +900,11 @@ class LibraryPages:
                 badges.append((f"本地 {local_n}", "ok"))
             if ref_n:
                 badges.append(f"在线 {ref_n}")
+            # The first six covers sit above the fold on a typical desktop and
+            # must paint at once: a lazy-loaded thumbnail there shows up as a
+            # blank card while the user waits, which was the dominant visual
+            # defect on /. Everything past the fold stays lazy.
+            loading = "eager" if index < 6 else "lazy"
             cards.append(
                 cover_card(
                     href=href,
@@ -894,6 +914,7 @@ class LibraryPages:
                     plate_css=self._plate_gradient(index),
                     badges=badges,
                     initial=(title[:1] or "?"),
+                    loading=loading,
                 )
             )
         if rail:
@@ -926,32 +947,42 @@ class LibraryPages:
 
     def _render_recordings(self, query: dict[str, list[str]]) -> str:
         """Local file management page: every recording / import grouped by post,
-        with play, rename and delete. Shows disk usage in one place."""
+        with play, rename and delete. Shows disk usage in one place.
+
+        Every row is rendered. A record whose file can no longer be served gets
+        the honest 文件丢失 state plus the two actions that actually make sense
+        (re-link it to a real file, or drop the row) — it used to be skipped
+        outright, which hid the broken record and left it in the database
+        forever with no way for the user to see or reach it.
+        """
         rows = self.db.list_local_media()
+        report = audit_local_media(self.db, self.root)
+        relink_options = _relink_options(report.orphans)
         total_bytes = 0
+        missing_count = 0
         groups: dict[str, list] = {}
         for media in rows:
-            path = Path(str(media["file_path"] or ""))
-            if not path.is_file():
-                continue
-            total_bytes += path.stat().st_size
-            try:
-                rel = path.resolve().relative_to(self.root)
-            except ValueError:
-                continue
-            src = f"/media/{quote(rel.as_posix())}"
+            media_id = int(media["id"])
             label = str(media["label"] or media["kind"] or "本地文件")
             title = str(media["title"] or media["item_url"] or "未知帖子")
             item_url = str(media["item_url"] or "")
             item_cover = str(media["item_cover"] or "")
-            size_hr = _human_size(path.stat().st_size)
             mtime = _human_time(media["updated_at"])
-            media_id = int(media["id"])
+            group = groups.setdefault(item_url, {"title": title, "cover": item_cover, "items": []})
+            path = servable_path(media["file_path"], self.root)
+            if path is None:
+                missing_count += 1
+                group["items"].append(
+                    _missing_recording_card(media, media_id, label, mtime, relink_options)
+                )
+                continue
+            total_bytes += path.stat().st_size
+            src = f"/media/{quote(path.relative_to(self.root).as_posix())}"
+            size_hr = _human_size(path.stat().st_size)
             local_mini = (
                 f"/watch-local?src={quote(src, safe='')}&title="
                 f"{quote(label, safe='')}&mini=1"
             )
-            group = groups.setdefault(item_url, {"title": title, "cover": item_cover, "items": []})
             actions = (
                 action_btn("播放", variant="local", size="sm", href=src, icon="")
                 + action_btn(
@@ -988,6 +1019,7 @@ class LibraryPages:
                 "</div>"
                 "<div class='rec-card-meta'>"
                 f"<span class='rec-badge' data-dur='{media_id}'>–:––</span>"
+                f"<span class='rec-state rec-state-ok'>{STATE_LOCAL_READY}</span>"
                 f"<span class='muted'>{size_hr}</span>"
                 f"<span class='muted'>{mtime}</span>"
                 "</div>"
@@ -998,7 +1030,10 @@ class LibraryPages:
                 "</article>"
             )
 
-        title_line = f"共 {len(rows)} 个本地文件"
+        available = len(rows) - missing_count
+        title_line = f"共 {available} 个本地文件"
+        if missing_count:
+            title_line += f" · {missing_count} 个文件丢失"
         if total_bytes:
             title_line += f" · 占用 {_human_size(total_bytes)}"
         group_html: list[str] = []
@@ -1007,7 +1042,7 @@ class LibraryPages:
                 cover = group["cover"]
                 thumb = (
                     f"<div class='rec-group-cover' "
-                    f"style='background-image:url({_h(cover)})'></div>"
+                    f"style='background-image:url({_h(local_cover(cover))})'></div>"
                     if cover
                     else "<div class='rec-group-cover rec-group-cover-plain'>♥</div>"
                 )
@@ -1037,8 +1072,15 @@ class LibraryPages:
             crumb(("收藏馆", "/"), ("本地媒体", None)),
             page_header(
                 "本地媒体管理",
-                subtitle="本地文件按帖子分组；删除会同时移除磁盘文件。",
-                trailing=f"<span class='muted section-count'>{_h(title_line)}</span>",
+                subtitle=(
+                    "本地文件按帖子分组；「删除」同时移除磁盘文件，"
+                    "「移除记录」只删除数据库记录。"
+                ),
+                trailing=(
+                    "<a class='action-btn action-ghost action-sm' href='/storage'>"
+                    "存储与完整性</a>"
+                    f"<span class='muted section-count'>{_h(title_line)}</span>"
+                ),
             ),
             section_block(
                 "文件列表",
@@ -1048,55 +1090,64 @@ class LibraryPages:
         ]
         # Release the <video> handle before asking the server to delete —
         # Windows refuses unlink() while the page still has the file open.
-        body.append(
-            "<script>"
-            "function _releaseMedia(id){"
-            "try{var v=document.querySelector('video[data-dur-src=\"'+id+'\"]');"
-            "if(v){try{v.pause();}catch(e){}v.removeAttribute('src');"
-            "try{v.load();}catch(e){}}}catch(e){}}"
-            "function _doDelete(id){"
-            "_releaseMedia(id);"
-            "return new Promise(function(res){setTimeout(function(){"
-            "fetch('/recordings/delete',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(res)"
-            ".catch(function(){res({ok:false});});},220);});}"
-            "function deleteMedia(id, name){"
-            "var run=function(){_doDelete(id).then(function(d){"
-            "if(d&&d.ok){"
-            "if(window.__asmrlibToast)window.__asmrlibToast(d.file_removed?'已删除':(d.file_error||'已从库中移除'));"
-            "location.reload();}"
-            "else{if(window.__asmrlibToast)window.__asmrlibToast('删除失败');else alert('删除失败');}});};"
-            "if(window.__asmrlibConfirm){"
-            "window.__asmrlibConfirm('删除「'+name+'」？该文件会从磁盘移除。',run);return false;}"
-            "if(!confirm('删除「'+name+'」？该文件会从磁盘移除。'))return false;"
-            "run();return false;}"
-            "function renameMedia(id, cur){"
-            "if(window.__asmrlibPrompt){"
-            "window.__asmrlibPrompt('重命名：',cur,function(label){"
-            "fetch('/recordings/rename',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({id:id,label:label})}).then(function(r){return r.json();}).then(function(d){"
-            "if(d&&d.ok){if(window.__asmrlibToast)window.__asmrlibToast('已重命名');location.reload();}"
-            "else{if(window.__asmrlibToast)window.__asmrlibToast('重命名失败');}});});"
-            "return false;}"
-            "var label=prompt('重命名：',cur);"
-            "if(label===null||!label.trim())return false;"
-            "fetch('/recordings/rename',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({id:id,label:label.trim()})}).then(function(r){return r.json();}).then(function(d){"
-            "if(d&&d.ok){location.reload();}else{alert('重命名失败');}});"
-            "return false;}"
-            "function fmtDur(s){if(!isFinite(s)||s<=0)return '–:––';"
-            "s=Math.floor(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;"
-            "function p(n){return (n<10?'0':'')+n;}return (h?h+':':'')+p(m)+':'+p(x);}"
-            "document.querySelectorAll('video[data-dur-src]').forEach(function(v){"
-            "var id=v.getAttribute('data-dur-src');"
-            "var badge=document.querySelector('[data-dur=\"'+id+'\"]');"
-            "v.addEventListener('loadedmetadata',function(){"
-            "if(badge)badge.textContent=fmtDur(v.duration);});"
-            "v.addEventListener('error',function(){if(badge)badge.textContent='–';});"
-            "});"
-            "</script>"
-        )
-        return self._page("本地媒体管理", body)
+        body.append(_local_media_script())
+        return _page("本地媒体管理", body)
+
+    def _render_storage(self, query: dict[str, list[str]]) -> str:
+        """Honest storage accounting for the managed root.
+
+        Three read-only answers in one place: what each part of the root
+        costs and whether it is regenerable cache or the user's own saves,
+        which records point at files that can no longer be served, and which
+        files on disk no record references.
+
+        There is deliberately no "clean up" control. The scan never deletes
+        anything, no file is ever removed automatically, and the only action
+        offered is attaching one orphan to one broken record by hand.
+        """
+        report = audit_local_media(self.db, self.root)
+        return _page("存储与完整性", self._storage_body(report))
+
+    def _storage_body(self, report: LocalAuditReport) -> list[str]:
+        return [
+            crumb(("收藏馆", "/"), ("本地媒体", "/recordings"), ("存储与完整性", None)),
+            page_header(
+                "存储与完整性",
+                subtitle=(
+                    "只读扫描：这里不会自动删除任何文件，也没有批量删除。"
+                    "每个文件都由你单独决定。"
+                ),
+                trailing=(
+                    "<a class='action-btn action-ghost action-sm' href='/recordings'>"
+                    "本地媒体管理</a>"
+                ),
+            ),
+            section_block(
+                "存储占用",
+                _storage_table(report),
+                extra_class="rec-panel",
+                hint=(
+                    f"其中可重建缓存 {_human_size(report.cache_bytes)}（删掉会重新生成），"
+                    f"自有文件 {_human_size(report.owned_bytes)}（你的存档，不要删）。"
+                ),
+            ),
+            section_block(
+                "文件丢失的记录",
+                _missing_list(report),
+                extra_class="rec-panel",
+                hint="这些记录指向的文件已经无法播放；到本地媒体管理页重新关联或移除记录。",
+            ),
+            section_block(
+                "孤儿文件",
+                _orphan_list(report),
+                extra_class="rec-panel",
+                hint=(
+                    "磁盘上存在、但没有任何记录引用的文件。"
+                    "扫描只做统计，不会移动或删除它们。"
+                ),
+            ),
+            _local_media_script(),
+        ]
 
     def _pagination(
         self,
@@ -1111,4 +1162,283 @@ class LibraryPages:
         return pagination_html(
             base, page, total, PAGE_SIZE, q=q, tag=tag, name=name
         )
+
+
+# ------------------------------------------------------------------ local media
+#
+# Module-level helpers for /recordings and /storage. They are free functions
+# rather than methods because they render one card or one list from data the
+# caller already has, and the audit module is the only thing that decides
+# what state a file is in.
+
+
+def _local_media_script() -> str:
+    """Client actions shared by /recordings and /storage.
+
+    Four explicit, single-item operations — delete (row + file), forget (row
+    only), re-link a broken record, and attach an orphan to a broken record.
+    Nothing here loops over every file, and nothing ever deletes on its own.
+    """
+    return (
+        "<script>"
+        "function _releaseMedia(id){"
+        "try{var v=document.querySelector('video[data-dur-src=\"'+id+'\"]');"
+        "if(v){try{v.pause();}catch(e){}v.removeAttribute('src');"
+        "try{v.load();}catch(e){}}}catch(e){}}"
+        "function _doDelete(id){"
+        "_releaseMedia(id);"
+        "return new Promise(function(res){setTimeout(function(){"
+        "fetch('/recordings/delete',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({id:id})}).then(function(r){return r.json();}).then(res)"
+        ".catch(function(){res({ok:false});});},220);});}"
+        "function deleteMedia(id, name){"
+        "var run=function(){_doDelete(id).then(function(d){"
+        "if(d&&d.ok){"
+        "if(window.__asmrlibToast)window.__asmrlibToast(d.file_removed?'已删除':(d.file_error||'已从库中移除'));"
+        "location.reload();}"
+        "else{if(window.__asmrlibToast)window.__asmrlibToast('删除失败');else alert('删除失败');}});};"
+        "if(window.__asmrlibConfirm){"
+        "window.__asmrlibConfirm('删除「'+name+'」？该文件会从磁盘移除。',run);return false;}"
+        "if(!confirm('删除「'+name+'」？该文件会从磁盘移除。'))return false;"
+        "run();return false;}"
+        "function renameMedia(id, cur){"
+        "if(window.__asmrlibPrompt){"
+        "window.__asmrlibPrompt('重命名：',cur,function(label){"
+        "fetch('/recordings/rename',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({id:id,label:label})}).then(function(r){return r.json();}).then(function(d){"
+        "if(d&&d.ok){if(window.__asmrlibToast)window.__asmrlibToast('已重命名');location.reload();}"
+        "else{if(window.__asmrlibToast)window.__asmrlibToast('重命名失败');}});});"
+        "return false;}"
+        "var label=prompt('重命名：',cur);"
+        "if(label===null||!label.trim())return false;"
+        "fetch('/recordings/rename',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({id:id,label:label.trim()})}).then(function(r){return r.json();}).then(function(d){"
+        "if(d&&d.ok){location.reload();}else{alert('重命名失败');}});"
+        "return false;}"
+        "function _postRelink(id, path){"
+        "fetch('/recordings/relink',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({id:Number(id),path:path})}).then(function(r){return r.json();}).then(function(d){"
+        "if(d&&d.ok){if(window.__asmrlibToast)window.__asmrlibToast('已重新关联');location.reload();}"
+        "else{var m=(d&&d.error)||'重新关联失败';"
+        "if(window.__asmrlibToast)window.__asmrlibToast(m);else alert(m);}});"
+        "return false;}"
+        "function relinkMedia(id){"
+        "var sel=document.querySelector('select[data-relink=\"'+id+'\"]');"
+        "var path=sel?sel.value:'';"
+        "if(!path){var m='请先选择要关联的库内文件';"
+        "if(window.__asmrlibToast)window.__asmrlibToast(m);else alert(m);return false;}"
+        "return _postRelink(id, path);}"
+        "function relinkOrphan(idx, path){"
+        "var sel=document.getElementById('orphan-relink-'+idx);"
+        "var id=sel?sel.value:'';"
+        "if(!id){var m='请先选择要关联的记录';"
+        "if(window.__asmrlibToast)window.__asmrlibToast(m);else alert(m);return false;}"
+        "return _postRelink(id, path);}"
+        "function forgetMedia(id, name){"
+        "var run=function(){fetch('/recordings/forget',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})"
+        ".then(function(r){return r.json();}).then(function(d){"
+        "if(d&&d.ok){"
+        "if(window.__asmrlibToast)window.__asmrlibToast('已移除记录，磁盘文件未改动');"
+        "location.reload();}"
+        "else{if(window.__asmrlibToast)window.__asmrlibToast('移除失败');else alert('移除失败');}});};"
+        "if(window.__asmrlibConfirm){"
+        "window.__asmrlibConfirm('移除「'+name+'」的记录？只会删除数据库记录，磁盘文件不会被删除。',run);"
+        "return false;}"
+        "if(!confirm('移除「'+name+'」的记录？只会删除数据库记录，磁盘文件不会被删除。'))return false;"
+        "run();return false;}"
+        "function fmtDur(s){if(!isFinite(s)||s<=0)return '–:––';"
+        "s=Math.floor(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;"
+        "function p(n){return (n<10?'0':'')+n;}return (h?h+':':'')+p(m)+':'+p(x);}"
+        "document.querySelectorAll('video[data-dur-src]').forEach(function(v){"
+        "var id=v.getAttribute('data-dur-src');"
+        "var badge=document.querySelector('[data-dur=\"'+id+'\"]');"
+        "v.addEventListener('loadedmetadata',function(){"
+        "if(badge)badge.textContent=fmtDur(v.duration);});"
+        "v.addEventListener('error',function(){if(badge)badge.textContent='–';});"
+        "});"
+        "</script>"
+    )
+
+
+def _relink_options(orphans: Sequence[OrphanFile]) -> str:
+    """Options for re-pointing a broken record at a file that does exist."""
+    if not orphans:
+        return "<option value=''>库内没有可关联的文件</option>"
+    options = ["<option value=''>选择库内文件…</option>"]
+    options.extend(
+        f"<option value='{_h(item.rel_path)}'>{_h(item.rel_path)}</option>"
+        for item in orphans
+    )
+    return "".join(options)
+
+
+def _missing_recording_card(
+    media, media_id: int, label: str, mtime: str, relink_options: str
+) -> str:
+    """Render one record whose file can no longer be served.
+
+    The state is stated outright and only the two honest actions are offered:
+    re-link the record to a file that does exist, or drop the database row.
+    Playback is never offered, because there is nothing to play.
+    """
+    raw = str(media["file_path"] or "")
+    display = Path(raw).name or raw or "未记录路径"
+    note = (
+        "<span class='muted rec-note'>记录路径在库外，播放器读不到</span>"
+        if Path(raw).expanduser().is_file()
+        else ""
+    )
+    actions = (
+        f"<select class='rec-relink' data-relink='{media_id}' "
+        f"aria-label='选择要关联的库内文件'>{relink_options}</select>"
+        + action_btn(
+            "重新关联",
+            variant="ghost",
+            size="sm",
+            onclick=f"return relinkMedia({media_id})",
+            icon="",
+        )
+        + action_btn(
+            "移除记录",
+            variant="danger",
+            size="sm",
+            onclick=f"return forgetMedia({media_id}, {json.dumps(display)})",
+            icon="",
+        )
+    )
+    return (
+        "<article class='rec-card rec-card-missing'>"
+        "<div class='rec-card-main'>"
+        f"<strong class='rec-label'>{_h(label)}</strong>"
+        f"<span class='muted rec-file'>{_h(display)}</span>"
+        f"{note}"
+        "</div>"
+        "<div class='rec-card-meta'>"
+        f"<span class='rec-state rec-state-missing'>{STATE_FILE_MISSING}</span>"
+        f"<span class='muted'>{_h(mtime)}</span>"
+        "</div>"
+        f"<div class='rec-card-actions'>{actions}</div>"
+        "</article>"
+    )
+
+
+def _stamp(epoch: float) -> str:
+    """Filesystem mtime as a local ``YYYY-MM-DD HH:MM`` label."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(epoch)))
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _storage_table(report: LocalAuditReport) -> str:
+    rows = [
+        "<div class='store-table'>",
+        "<div class='store-row store-row-head'>"
+        "<span>分类</span><span>性质</span><span>文件数</span><span>占用</span>"
+        "</div>",
+    ]
+    for item in report.storage:
+        kind = "可重建缓存" if item.is_cache else "自有文件"
+        css = "store-kind-cache" if item.is_cache else "store-kind-owned"
+        rows.append(
+            "<div class='store-row'>"
+            "<span class='store-cell-main'>"
+            f"<strong>{_h(item.label)}</strong>"
+            f"<span class='muted store-path'>{_h(item.path.name)}</span>"
+            "</span>"
+            f"<span class='{css}'>{kind}</span>"
+            f"<span class='muted'>{item.files}</span>"
+            f"<span>{_h(_human_size(item.size))}</span>"
+            "</div>"
+        )
+    rows.append(
+        "<div class='store-row store-row-total'>"
+        "<span class='store-cell-main'><strong>合计</strong></span>"
+        "<span></span>"
+        f"<span class='muted'>{report.total_files}</span>"
+        f"<span>{_h(_human_size(report.total_bytes))}</span>"
+        "</div>"
+    )
+    rows.append("</div>")
+    return "".join(rows)
+
+
+def _missing_list(report: LocalAuditReport) -> str:
+    if not report.missing:
+        return (
+            "<p class='muted'>没有丢失的记录：每条本地媒体记录都能对应到磁盘上的文件。</p>"
+        )
+    lines = ["<ul class='store-list'>"]
+    for item in report.missing:
+        reason = (
+            "记录路径在库外，播放器读不到"
+            if item.exists_on_disk
+            else "记录的文件已不在磁盘上"
+        )
+        link = (
+            f"<a class='store-link' href='/post/{quote(item.item_url, safe='')}'>"
+            f"{_h(item.item_title)}</a>"
+            if item.item_url
+            else f"<span class='muted'>{_h(item.item_title)}</span>"
+        )
+        lines.append(
+            "<li class='store-line'>"
+            f"<span class='rec-state rec-state-missing'>{STATE_FILE_MISSING}</span>"
+            "<span class='store-line-main'>"
+            f"<strong>{_h(item.label)}</strong>"
+            f"<span class='muted store-path'>{_h(item.path or '未记录路径')}</span>"
+            "</span>"
+            f"{link}"
+            f"<span class='muted'>{_h(reason)}</span>"
+            "</li>"
+        )
+    lines.append("</ul>")
+    return "".join(lines)
+
+
+def _orphan_list(report: LocalAuditReport) -> str:
+    if not report.orphans:
+        return (
+            "<p class='muted'>没有孤儿文件：磁盘上的每个媒体文件都有记录引用它。</p>"
+        )
+    targets = "".join(
+        f"<option value='{item.media_id}'>"
+        f"{_h(item.label)} — {_h(item.item_title)}</option>"
+        for item in report.missing
+    )
+    lines = ["<ul class='store-list'>"]
+    for index, orphan in enumerate(report.orphans):
+        if targets:
+            action = (
+                f"<select class='rec-relink' id='orphan-relink-{index}' "
+                f"aria-label='选择要关联的记录'>{targets}</select>"
+                + action_btn(
+                    "关联到记录",
+                    variant="ghost",
+                    size="sm",
+                    onclick=(
+                        f"return relinkOrphan({index}, {json.dumps(orphan.rel_path)})"
+                    ),
+                    icon="",
+                )
+            )
+        else:
+            action = (
+                "<span class='muted store-note'>没有「文件丢失」的记录可以关联</span>"
+            )
+        lines.append(
+            "<li class='store-line'>"
+            f"<span class='rec-state rec-state-orphan'>{STATE_ORPHAN_FILE}</span>"
+            "<span class='store-line-main'>"
+            f"<strong>{_h(Path(orphan.rel_path).name)}</strong>"
+            f"<span class='muted store-path'>{_h(orphan.rel_path)}</span>"
+            "</span>"
+            f"<span class='muted'>{_h(_human_size(orphan.size))}</span>"
+            f"<span class='muted'>{_h(_stamp(orphan.mtime))}</span>"
+            f"{action}"
+            "</li>"
+        )
+    lines.append("</ul>")
+    return "".join(lines)
 

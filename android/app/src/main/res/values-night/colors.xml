@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep both system configurations on the same app-owned dark palette. -->
+    <color name="app_bg">#0a0b0f</color>
+</resources>

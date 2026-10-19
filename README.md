@@ -171,6 +171,26 @@ uv --cache-dir .uv-cache pip install --python .venv\Scripts\python.exe -e ".[des
 - 构建日志分别报告运行时大小与包含用户数据后的总大小；60 MiB 目标以 `_internal/` 加 exe 的运行时大小为准，持续增长的 `data/` 不计入。
 - Windows 需已安装 **WebView2**（Win11 通常自带）；它负责受控在线播放，不是随包附带的 Chromium。
 
+## 手机访问 / APK
+
+页面已做移动端响应式（底部四标签导航、安全区、触控目标 ≥44px），三种用法详见
+[`docs/mobile.md`](docs/mobile.md)：
+
+```powershell
+# 1) 手机浏览器直连：电脑上放开局域网监听，手机访问 http://<电脑IP>:8765/
+.\.venv\Scripts\asmrlib-archiver.exe serve --host 0.0.0.0
+
+# 2) APK（推荐）：android/ 零依赖 WebView 壳，含手机网络测试门 +
+#    与桌面同源的广告拦截（assets/blocklist.json，与 Python 名单强制同步）。
+#    无本机 JDK 时由 .github/workflows/android-apk.yml 自动出包。
+
+# 改动广告名单后必须重新生成 APK 拦截清单：
+.\.venv\Scripts\python.exe -m asmrlib_archiver.mobile_blocklist
+```
+
+手机网络测试：页面自动探测「电脑→站点/播放器」与「手机→收藏馆」两级网络，
+不合适（上游不可达 / 延迟高 / 2g / 省流模式）时弹出黄/红横幅，正常时保持安静。
+
 ## 测试
 
 ```powershell

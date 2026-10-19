@@ -1,0 +1,5 @@
+# Build outputs and machine-local files
+build/
+.gradle/
+local.properties
+*.iml

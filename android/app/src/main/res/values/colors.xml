@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app intentionally stays dark in either system mode. Match the
+         bundled pages and native Theme.BG before the first frame is drawn. -->
+    <color name="app_bg">#0a0b0f</color>
+
+    <!-- The adaptive icon's plate. Deliberately NOT theme-aware: a launcher
+         icon that changes colour with the system theme is a different brand on
+         every phone, and the mark's glyph needs the dark plate to sit on. -->
+    <color name="ic_launcher_background">#0a0b0f</color>
+</resources>

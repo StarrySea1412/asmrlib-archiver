@@ -1,26 +1,42 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import mimetypes
 import shutil
+import socket
+import ssl
 import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse  # urlparse also used by live sync
 
 from ..config import AppConfig
 from ..db import ArchiveDb
+from ..source_health import PlaybackOutcome, compose_failure_reason
 from ..storage import Storage
 from .assets import (
     DEFAULT_CSP,
     WATCH_CSP,
 )
+from .playback import PLAY_CSP
 from .library import LibraryPages
 from .live import LivePages
 from .playback import PlaybackPages
 from .preview import generate_video_preview
-from .ui_assets import UI_VERSION, cover_service_worker, static_asset
+from .page_shell import _page
+from .ui_assets import (
+    UI_VERSION,
+    app_icon_svg,
+    app_manifest,
+    cover_service_worker,
+    static_asset,
+)
 from .util import (
     _delete_file_robust,
     _h,
@@ -55,6 +71,21 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
             "source": "",  # "startup" | "live" | ""
         }
         self._startup_sync_started = False
+        # Mobile/phone network suitability probe: TCP-RTT to the site and the
+        # main player hosts, cached so a burst of phone tabs costs one check.
+        # Refreshed on a background thread — never inline in a request.
+        self._net_lock = threading.Lock()
+        self._net_cache: dict[str, object] | None = None
+        self._net_cache_at = 0.0
+        self._net_refreshing = False
+        # Cover proxy: host allowlist (archive covers + configured domains),
+        # rebuilt rarely because it only ever grows as the archive grows.
+        self._cover_hosts: set[str] | None = None
+        self._cover_hosts_at = 0.0
+        # "Save to library" tasks: the fetch runs on a worker thread because
+        # an HLS playlist can take minutes, and the page polls for progress.
+        self._save_tasks: dict[str, dict] = {}
+        self._save_lock = threading.Lock()
         # Clean up files that a previous session couldn't delete because the
         # page still had them open (Windows sharing violation).
         _sweep_deleted_files(self.root)
@@ -304,6 +335,190 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
         ).start()
         return True
 
+    # ---------------------------------------------------------- network check
+
+    def _net_probe_hosts(self) -> list[str]:
+        """Hosts the suitability probe should reach (site + main players)."""
+        hosts: list[str] = []
+        for domain in self.config.allowed_domains or []:
+            host = str(domain).strip().lower().rstrip(".")
+            if host and host not in hosts:
+                hosts.append(host)
+        try:
+            from ..security_lists import PLAYER_DOMAINS
+
+            for host in PLAYER_DOMAINS:
+                host = str(host).strip().lower().rstrip(".")
+                if host and host not in hosts:
+                    hosts.append(host)
+        except Exception:  # noqa: BLE001 - probe must never break the app
+            pass
+        return hosts[:5]
+
+    @staticmethod
+    def _tcp_rtt_ms(host: str, port: int, timeout: float = 2.5) -> tuple[bool, int, str]:
+        """One TCP connect probe. Returns (ok, rtt_ms, error)."""
+        start = time.perf_counter()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                rtt = int((time.perf_counter() - start) * 1000)
+                return True, rtt, ""
+        except OSError as exc:
+            return False, 0, f"{type(exc).__name__}"
+
+    @staticmethod
+    def _tls_rtt_ms(
+        host: str, port: int = 443, timeout: float = 2.5
+    ) -> tuple[bool, int, str]:
+        """One TLS-handshake probe: connect, complete the handshake, hang up.
+
+        No HTTP request is ever written, so this keeps the probe's original
+        bargain (no content, no site quota, nothing for robots.txt to govern)
+        while answering the question TCP connect cannot: is HTTPS actually
+        *usable*? Certificate validation is deliberately off — an expired or
+        self-signed cert is not what makes the site unreachable, and treating
+        it as a failure would produce false "网络不适合" banners.
+        """
+        start = time.perf_counter()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        try:
+            with socket.create_connection((host, port), timeout=timeout) as raw:
+                with context.wrap_socket(raw, server_hostname=host):
+                    return True, int((time.perf_counter() - start) * 1000), ""
+        except OSError as exc:  # ssl.SSLError is an OSError subclass
+            return False, 0, f"{type(exc).__name__}"
+
+    def _probe_upstream(self) -> dict:
+        """Run one upstream probe round and return its payload (no caching)."""
+        hosts = self._net_probe_hosts()
+        results: list[dict] = []
+        for host in hosts:
+            tls_ok, tls_err = False, ""
+            try:
+                ok, rtt, err = self._tcp_rtt_ms(host, 443)
+                if not ok:
+                    ok, rtt, err = self._tcp_rtt_ms(host, 80)
+                if ok:
+                    # A successful connect is not the same as a usable site:
+                    # some networks let the TCP handshake through and then
+                    # break the TLS one, so every fetch dies with
+                    # `SSL: UNEXPECTED_EOF_WHILE_READING` while the probe
+                    # reported everything fine (measured 2026-09-13).
+                    tls_ok, tls_rtt, tls_err = self._tls_rtt_ms(host, 443)
+                    if tls_ok:
+                        rtt = tls_rtt
+            except Exception as exc:  # noqa: BLE001 - probe never breaks serving
+                ok, rtt, err = False, 0, f"{type(exc).__name__}"
+            results.append(
+                {
+                    "host": host,
+                    "ok": ok,
+                    "rtt_ms": rtt,
+                    "error": err,
+                    "tls_ok": tls_ok,
+                    "tls_error": tls_err,
+                }
+            )
+        reachable = [r for r in results if r["ok"]]
+        # Latency should describe the best *usable* upstream: a host whose
+        # TLS is torn down is not usable however fast its connect was.
+        usable = [r for r in results if r["tls_ok"]] or reachable
+        return {
+            "ok": bool(reachable),
+            "tls_ok": any(r["tls_ok"] for r in results),
+            # The site itself is hosts[0] (see _net_probe_hosts) — the phone
+            # banner weighs its TLS state separately from a player's, because
+            # losing the site kills discovery/archive/online playback while
+            # losing one player only kills that source.
+            "site_host": hosts[0] if hosts else "",
+            "checked_at": int(time.time()),
+            "upstream": results,
+            "best_rtt_ms": min((r["rtt_ms"] for r in usable), default=0),
+        }
+
+    def _network_check_payload(self, client_host: str) -> dict:
+        """Upstream reachability + RTT for the phone-side network banner.
+
+        TCP connect plus a TLS handshake — no HTTP requests, no content, no
+        robots impact. Answers instantly from cache (TTL 60 s, stale allowed)
+        and refreshes in a background thread: a cold probe takes seconds and
+        would poison the phone's RTT measurement with false "bad" verdicts.
+        """
+        now = time.time()
+        with self._net_lock:
+            cache = self._net_cache
+            fresh = cache is not None and now - self._net_cache_at < 60.0
+            refreshing = self._net_refreshing
+            if not fresh and not refreshing:
+                self._net_refreshing = True
+                threading.Thread(
+                    target=self._net_refresh_worker, daemon=True,
+                    name="viewer-net-probe",
+                ).start()
+
+        if cache is None:
+            payload: dict[str, object] = {
+                "ok": None,
+                "pending": True,
+                "checked_at": 0,
+                "upstream": [],
+                "best_rtt_ms": 0,
+            }
+        else:
+            payload = dict(cache)
+            payload["stale"] = not fresh
+        payload["client"] = client_host
+        payload["client_is_local"] = client_host in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }
+        return payload
+
+    def _net_refresh_worker(self) -> None:
+        try:
+            payload = self._probe_upstream()
+            with self._net_lock:
+                self._net_cache = payload
+                self._net_cache_at = time.time()
+        finally:
+            with self._net_lock:
+                self._net_refreshing = False
+
+    def _resolve_player_payload(self, query: dict[str, list[str]]) -> dict:
+        """Resolve a post page to its bare player embed for the APK shell.
+
+        The APK opens online playback in its own (shielded) WebView; handing
+        it the bare embed keeps that in-app browser lightweight — no site
+        header, related grid or ad iframes, same as the desktop sandbox.
+        Best-effort: on any failure the caller navigates to the original URL.
+        """
+        raw = (query.get("url") or [""])[0].strip()
+        if not raw.startswith(("http://", "https://")):
+            return {"ok": False, "error": "invalid url"}
+        try:
+            from ..player_guard import policy_from_config
+
+            policy = policy_from_config(self.config)
+            validated = policy.validate(raw)
+        except Exception as exc:  # noqa: BLE001 - best-effort endpoint
+            return {"ok": False, "error": str(getattr(exc, "code", "invalid_url"))}
+        try:
+            from ..player_resolver import resolve_player_url
+
+            resolved = resolve_player_url(validated)
+            player_url = policy.validate(resolved.player_url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}"}
+        return {
+            "ok": True,
+            "player_url": player_url,
+            "source_url": validated,
+            "is_bare": resolved.is_direct,
+        }
+
     def _startup_sync_banner_html(self) -> str:
         """Home-page strip: tag_seeds sync progress / last result."""
         seed_tags = self._auto_archive_tag_slugs()
@@ -508,8 +723,51 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
             if path == "/recordings":
                 self._send_html(handler, self._render_recordings(query))
                 return
+            if path == "/storage":
+                self._send_html(handler, self._render_storage(query))
+                return
             if path == "/sync-status":
                 self._send_json(handler, self._sync_status_payload())
+                return
+            if path == "/api/network-check":
+                client_ip = ""
+                with contextlib.suppress(Exception):
+                    client_ip = handler.client_address[0]
+                self._send_json(handler, self._network_check_payload(client_ip))
+                return
+            if path == "/api/resolve-player":
+                self._send_json(handler, self._resolve_player_payload(query))
+                return
+            if path == "/api/save-status":
+                task = (query.get("task") or [""])[0]
+                with self._save_lock:
+                    snapshot = dict(self._save_tasks.get(task, {}))
+                if not snapshot:
+                    self._send_json(
+                        handler, {"ok": False, "error": "unknown_task"}, status=404
+                    )
+                    return
+                if snapshot.get("state") == "downloaded":
+                    self._finish_media_save(task)
+                    with self._save_lock:
+                        snapshot = dict(self._save_tasks.get(task, {}))
+                if snapshot.get("state") == "error":
+                    self._record_save_health(task, ok=False)
+                    with self._save_lock:
+                        snapshot = dict(self._save_tasks.get(task, {}))
+                self._send_json(handler, {"ok": True, "task": task, **snapshot})
+                return
+            if path == "/manifest.webmanifest":
+                self._send_json(handler, app_manifest())
+                return
+            if path == "/ui/icon.svg":
+                body = app_icon_svg().encode("utf-8")
+                handler.send_response(200)
+                handler.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                handler.send_header("Content-Length", str(len(body)))
+                handler.send_header("Cache-Control", "public, max-age=86400")
+                handler.end_headers()
+                handler.wfile.write(body)
                 return
             if path == "/api/live-feed":
                 self._send_json(handler, self._live_feed_cached(query))
@@ -522,11 +780,15 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                     self._send_ui_asset(handler, asset)
                 return
             if path == "/cover-cache-sw.js":
-                cover_domains = [
-                    *list(self.config.allowed_domains or []),
-                    *list(self.config.download.allowed_media_domains or []),
-                ]
+                # The Service Worker only ever received configured domains, so
+                # it silently cached nothing: every cover in this archive comes
+                # from a CDN that list does not name. Feed it the hosts the
+                # archive actually uses.
+                cover_domains = sorted(self._cover_allow_hosts())
                 self._send_ui_asset(handler, cover_service_worker(cover_domains))
+                return
+            if path == "/cover":
+                self._send_cover(handler, (query.get("u") or [""])[0])
                 return
             if path.startswith("/media/"):
                 self._send_media(handler, path[len("/media/") :])
@@ -541,6 +803,10 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                     status=self._watch_http_status(query),
                     csp=WATCH_CSP,
                 )
+                return
+            if path == "/play":
+                html, status = self._render_play(query)
+                self._send_html(handler, html, status=status, csp=PLAY_CSP)
                 return
             if path == "/watch-local":
                 self._send_html(
@@ -578,7 +844,7 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
     def _send_retired(self, handler: BaseHTTPRequestHandler, path: str) -> None:
         from .components import button, empty_state
 
-        page = self._page(
+        page = _page(
             "Feature removed",
             [
                 empty_state(
@@ -676,6 +942,94 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
                     return
                 self.db.rename_media_label(media_id, label)
                 self._send_json(handler, {"ok": True, "media_id": media_id, "label": label})
+                return
+            if path == "/recordings/forget":
+                # Drop the database row and nothing else. "删除" removes the
+                # file too, so it cannot be used on a record whose file is
+                # already gone: it would report a file removal that never
+                # happened. Forgetting is the honest, non-destructive option.
+                length = int(handler.headers.get("Content-Length") or 0)
+                body = handler.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    payload = {}
+                media_id = int(payload.get("id") or 0)
+                if not media_id:
+                    self._send_json(handler, {"ok": False, "error": "missing id"})
+                    return
+                self.db.delete_media_row(media_id)
+                self._send_json(
+                    handler,
+                    {"ok": True, "media_id": media_id, "row_removed": True},
+                )
+                return
+            if path == "/recordings/relink":
+                # Point a broken record at a file that is already inside the
+                # managed root. The path arrives as a root-relative string so
+                # the endpoint can never be aimed at an arbitrary disk path.
+                length = int(handler.headers.get("Content-Length") or 0)
+                body = handler.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    payload = {}
+                media_id = int(payload.get("id") or 0)
+                relative = str(payload.get("path") or "").strip()
+                if not media_id or not relative:
+                    self._send_json(handler, {"ok": False, "error": "missing id/path"})
+                    return
+                target = self._safe_data_path(relative)
+                if target is None or not target.is_file():
+                    self._send_json(handler, {"ok": False, "error": "库内找不到这个文件"})
+                    return
+                if not self.db.relink_media_file(media_id, str(target)):
+                    self._send_json(handler, {"ok": False, "error": "记录不存在"})
+                    return
+                self._send_json(
+                    handler,
+                    {"ok": True, "media_id": media_id, "file_path": str(target)},
+                )
+                return
+            if path == "/api/save-media":
+                length = int(handler.headers.get("Content-Length") or 0)
+                body = handler.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    payload = {}
+                self._start_media_save(
+                    handler,
+                    str(payload.get("source_url") or "").strip(),
+                    str(payload.get("media_url") or "").strip(),
+                    str(payload.get("label") or "").strip(),
+                )
+                return
+            if path == "/api/play-outcome":
+                length = int(handler.headers.get("Content-Length") or 0)
+                body = handler.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    payload = {}
+                self._send_json(handler, self._record_play_outcome(payload))
+                return
+            if path == "/api/play-preference":
+                length = int(handler.headers.get("Content-Length") or 0)
+                body = handler.rfile.read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    payload = {}
+                item_url = str(payload.get("item_url") or "").strip()
+                source_url = str(payload.get("url") or "").strip()
+                if not item_url or not source_url:
+                    self._send_json(
+                        handler, {"ok": False, "error": "missing item_url/url"}
+                    )
+                    return
+                self.db.set_source_preference(item_url, source_url)
+                self._send_json(handler, {"ok": True, "preferred": source_url})
                 return
             if path == "/tags/add":
                 length = int(handler.headers.get("Content-Length") or 0)
@@ -873,6 +1227,358 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
         handler.end_headers()
         handler.wfile.write(raw)
 
+    # ---- cover proxy ---------------------------------------------------
+    _COVER_HOST_TTL = 300.0
+    _COVER_MAX_BYTES = 8 * 1024 * 1024
+    _COVER_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
+    # Negative caching: without it every broken cover (dead 404s and hosts this
+    # network cannot reach alike) costs a fresh round-trip on *every* page load,
+    # which is the very slowness the proxy exists to remove. A 4xx means the
+    # image is gone, so it is not retried for a week; a timeout or reset may be
+    # transient, so it is retried within the hour.
+    _COVER_MISSING_TTL = 3600.0
+    _COVER_GONE_TTL = 7 * 24 * 3600.0
+
+    def _cover_allow_hosts(self) -> set[str]:
+        """Hosts the cover proxy (and the cover Service Worker) will accept.
+
+        Deliberately closed: only the configured domains plus the hosts the
+        archive's own covers already come from. That keeps the proxy from
+        becoming an open relay into the LAN while still covering every real
+        cover — a CDN the archive has never used gets no proxying and simply
+        falls back to the browser fetching it directly.
+        """
+        now = time.time()
+        hosts = self._cover_hosts
+        if hosts is not None and now - self._cover_hosts_at < self._COVER_HOST_TTL:
+            return hosts
+        hosts = set()
+        for domain in list(self.config.allowed_domains or []) + list(
+            self.config.download.allowed_media_domains or []
+        ):
+            cleaned = str(domain).strip().lower().rstrip(".")
+            if cleaned:
+                hosts.add(cleaned)
+        try:
+            for url in self.db.list_cover_urls():
+                host = (urlparse(url).hostname or "").lower().rstrip(".")
+                if host:
+                    hosts.add(host)
+        except Exception:  # noqa: BLE001 - a missing row must not break a page
+            pass
+        self._cover_hosts = hosts
+        self._cover_hosts_at = now
+        return hosts
+
+    def _media_allow_hosts(self) -> set[str]:
+        """Hosts the "save to library" endpoint may fetch from.
+
+        Same closed-set reasoning as the cover proxy, widened with the hosts
+        the archive's own media references already use: the endpoint takes a
+        URL from the page, so it must not become a fetcher for arbitrary
+        addresses (SSRF / LAN probe surface).
+        """
+        # Same-origin is allowed for media candidates stored by the archive,
+        # but private/loopback hosts must never be admitted: a malicious row
+        # must not turn this endpoint into an SSRF bridge.
+        hosts = {
+            host
+            for host in self._cover_allow_hosts()
+            if host not in {"localhost", "127.0.0.1", "::1"}
+        }
+        try:
+            for url in self.db.list_media_urls():
+                host = (urlparse(url).hostname or "").lower().rstrip(".")
+                if host:
+                    hosts.add(host)
+        except Exception:  # noqa: BLE001 - a missing row must not break a page
+            pass
+        return hosts
+
+    def _start_media_save(
+        self, handler: BaseHTTPRequestHandler, source_url: str, media_url: str, label: str
+    ) -> None:
+        """Kick off a background download of one media URL into the library."""
+        if not source_url or not media_url:
+            self._send_json(
+                handler, {"ok": False, "error": "missing source_url/media_url"}, status=400
+            )
+            return
+        try:
+            known = self.db.get_item(source_url) is not None
+        except Exception:  # noqa: BLE001
+            known = False
+        if not known:
+            self._send_json(
+                handler, {"ok": False, "error": "unknown_source_url"}, status=404
+            )
+            return
+        parsed = urlparse(media_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme not in {"http", "https"} or not host:
+            self._send_json(handler, {"ok": False, "error": "bad_media_url"}, status=400)
+            return
+        if host not in self._media_allow_hosts():
+            self._send_json(
+                handler, {"ok": False, "error": "host_not_allowed"}, status=403
+            )
+            return
+        # Only actual media URLs belong here. Player/embed pages are HTML and
+        # must first be opened in the guarded player, where the request sniffer
+        # captures the true .m3u8/.mp4 URL. Rejecting early keeps the endpoint
+        # honest and avoids a fake "saved" 1.6 KB HTML file.
+        media_path = parsed.path.lower()
+        if not any(
+            media_path.endswith(ext)
+            for ext in (
+                ".m3u8", ".mpd", ".mp4", ".webm", ".m4s", ".ts",
+                ".m4a", ".mp3", ".flac", ".ogg", ".wav", ".aac",
+            )
+        ):
+            self._send_json(
+                handler,
+                {
+                    "ok": False,
+                    "error": "not_direct_media",
+                    "message": "请先播放，待播放器识别真实媒体地址后再保存",
+                },
+                status=400,
+            )
+            return
+
+        # Resolve the allowlist on the request thread: the worker must not
+        # touch the sqlite connection from another thread (the connection is
+        # owned here, and a cross-thread query can block behind the request
+        # handler for the whole download).
+        allowed = frozenset(self._media_allow_hosts())
+        task_id = f"m{uuid.uuid4().hex[:12]}"
+        videos = self.root / "videos"
+        videos.mkdir(parents=True, exist_ok=True)
+        with self._save_lock:
+            self._save_tasks[task_id] = {
+                "state": "running",
+                "bytes": 0,
+                "segments_done": 0,
+                "segments_total": 0,
+                "source_url": source_url,
+                "media_url": media_url,
+                "label": label or "保存的媒体",
+            }
+
+        def _run() -> None:
+            try:
+                # app.py lives in asmrlib_archiver.viewer; media_save is its
+                # sibling at package root, so this is a two-dot import. Keep
+                # the import inside the try: an optional dependency/import
+                # failure must transition the task to error, never leave it
+                # stuck forever at state=running.
+                from ..media_save import save_media
+                result = save_media(
+                    media_url,
+                    save_dir=videos,
+                    allow_media=lambda value: (
+                        (urlparse(value).hostname or "").lower().rstrip(".") in allowed
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced to the poller
+                result = {"ok": False, "code": "save_crashed", "error": str(exc)}
+            state = dict(result)
+            # "downloaded" is a hand-off state: the DB attach happens on the
+            # request thread (see _finish_media_save) because the sqlite
+            # connection is not safe to use from this worker.
+            state["state"] = "downloaded" if result.get("ok") else "error"
+            with self._save_lock:
+                self._save_tasks[task_id] = {
+                    **self._save_tasks.get(task_id, {}),
+                    **state,
+                }
+
+        threading.Thread(
+            target=_run, name=f"asmrlib-save-{task_id}", daemon=True
+        ).start()
+        self._send_json(handler, {"ok": True, "task": task_id, "state": "running"})
+
+    def _record_play_outcome(self, payload: dict) -> dict:
+        """Record what one playback attempt actually did.
+
+        The player page only reports ``playing`` once the player frame really
+        loaded; merely selecting a source reports nothing, so a source can
+        never earn a success it did not have. A ``failed`` report also puts
+        the source into cooldown so the next attempt does not start there,
+        and once every candidate has failed the response carries a readable
+        reason for the page to show instead of a blank player.
+        """
+
+        source_url = str(payload.get("url") or "").strip()
+        outcome = str(payload.get("outcome") or "").strip().lower()
+        if not source_url or outcome not in {"playing", "failed"}:
+            return {"ok": False, "error": "missing url/outcome"}
+        try:
+            latency_ms = int(payload.get("latency_ms") or -1)
+        except (TypeError, ValueError):
+            latency_ms = -1
+        try:
+            if outcome == "playing":
+                self.db.record_playback_outcome(
+                    source_url, PlaybackOutcome.PLAYING, max(latency_ms, 0), ""
+                )
+                return {"ok": True, "recorded": "playing"}
+            self.db.record_playback_outcome(
+                source_url,
+                PlaybackOutcome.FAILED,
+                -1,
+                str(payload.get("error") or ""),
+            )
+        except Exception:  # noqa: BLE001 - telemetry never breaks playback
+            return {"ok": False, "error": "record_failed"}
+
+        result: dict[str, object] = {"ok": True, "recorded": "failed"}
+        failures = payload.get("failures")
+        if isinstance(failures, list) and failures:
+            result["reason"] = compose_failure_reason(
+                [
+                    (
+                        str(item.get("label") or ""),
+                        str(item.get("url") or ""),
+                        str(item.get("error") or ""),
+                    )
+                    for item in failures
+                    if isinstance(item, dict)
+                ]
+            )
+        return result
+
+    def _record_save_health(self, task_id: str, *, ok: bool) -> None:
+        """Record a completed save result exactly once on the request thread."""
+        with self._save_lock:
+            task = dict(self._save_tasks.get(task_id, {}))
+        if task.get("health_recorded"):
+            return
+        source_url = str(task.get("source_url") or "")
+        media_url = str(task.get("media_url") or "")
+        if not source_url or not media_url:
+            return
+        try:
+            self.db.record_media_health(source_url, media_url, ok=ok)
+        except Exception:  # noqa: BLE001 - health telemetry never breaks saving
+            return
+        with self._save_lock:
+            self._save_tasks[task_id] = {
+                **self._save_tasks.get(task_id, {}),
+                "health_recorded": True,
+            }
+
+    def _finish_media_save(self, task_id: str) -> None:
+        """Attach a finished download to the library (request thread only)."""
+        with self._save_lock:
+            task = dict(self._save_tasks.get(task_id, {}))
+        if task.get("state") != "downloaded" or task.get("media_id") is not None:
+            return
+        path = str(task.get("path") or "")
+        source_url = str(task.get("source_url") or "")
+        if not path or not Path(path).is_file():
+            return
+        try:
+            media_id = self.db.attach_local_media(
+                source_url,
+                file_path=path,
+                label=str(task.get("label") or "保存的媒体"),
+                media_url=str(task.get("media_url") or ""),
+                kind="download",
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the poller
+            with self._save_lock:
+                self._save_tasks[task_id] = {
+                    **task,
+                    "state": "error",
+                    "error": f"attach_failed: {exc}",
+                }
+            return
+        with self._save_lock:
+            self._save_tasks[task_id] = {
+                **task,
+                "state": "done",
+                "media_id": media_id,
+            }
+        self._record_save_health(task_id, ok=True)
+
+    def _fetch_cover(self, url: str, target: Path) -> None:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": str(self.config.crawler.user_agent)},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if not content_type.startswith("image/"):
+                raise ValueError(f"not an image: {content_type or 'unknown'}")
+            data = response.read(self._COVER_MAX_BYTES + 1)
+        if len(data) > self._COVER_MAX_BYTES:
+            raise ValueError("cover too large")
+        partial = target.with_name(target.name + ".part")
+        partial.write_bytes(data)
+        partial.replace(target)
+
+    def _send_cover(self, handler: BaseHTTPRequestHandler, url: str) -> None:
+        """Serve a remote cover from this machine's cache, fetching it once.
+
+        Covers live on CDNs no project allowlist names, so the cover Service
+        Worker — which only ever saw ``allowed_domains`` — cached nothing and
+        every page load re-fetched 20-30 remote images at 200-1000 ms each.
+        Through here a cover is same-origin, fetched once for every client
+        (desktop and phone), and immutable afterwards.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            self._send_text(handler, 400, "Bad cover URL")
+            return
+        host = parsed.hostname.lower().rstrip(".")
+        if host not in self._cover_allow_hosts():
+            self._send_text(handler, 403, "Cover host not allowed")
+            return
+        suffix = Path(unquote(parsed.path)).suffix.lower()
+        ext = suffix if suffix in self._COVER_EXT else ".img"
+        cache_dir = self.root / "covers"
+        digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+        target = cache_dir / (digest + ext)
+        if not target.is_file():
+            missing = cache_dir / (digest + ".missing")
+            if missing.is_file():
+                kind = missing.read_text(encoding="utf-8", errors="replace").strip()
+                ttl = (
+                    self._COVER_GONE_TTL if kind == "gone" else self._COVER_MISSING_TTL
+                )
+                if time.time() - missing.stat().st_mtime < ttl:
+                    self._send_text(handler, 404, "Cover unavailable")
+                    return
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self._fetch_cover(url, target)
+            except urllib.error.HTTPError as exc:
+                # 4xx = the image is gone for good; anything else may recover.
+                missing.write_text(
+                    "gone" if 400 <= int(exc.code) < 500 else "error",
+                    encoding="utf-8",
+                )
+                self._send_text(handler, 404, "Cover unavailable")
+                return
+            except Exception:  # noqa: BLE001 - the card's plate fallback covers it
+                with contextlib.suppress(OSError):
+                    missing.write_text("error", encoding="utf-8")
+                self._send_text(handler, 502, "Cover unavailable")
+                return
+        body = target.read_bytes()
+        content_type = mimetypes.guess_type(target.name)[0] or "image/jpeg"
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        # The name is a hash of the URL, so a hit can never be stale.
+        handler.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        handler.send_header(
+            "Content-Security-Policy", "default-src 'none'; img-src 'self'"
+        )
+        handler.end_headers()
+        handler.wfile.write(body)
+
     def _send_ui_asset(self, handler: BaseHTTPRequestHandler, asset) -> None:
         """Send a CSS/JS asset with cache metadata and conditional ETag support."""
         request_headers = getattr(handler, "headers", {})
@@ -901,66 +1607,3 @@ class ArchiveViewer(LibraryPages, LivePages, PlaybackPages):
         handler.send_header("Content-Length", str(len(payload)))
         handler.end_headers()
         handler.wfile.write(payload)
-
-    def _page(self, title: str, body: list[str], *, mini: bool = False) -> str:
-        if mini:
-            return f"""<!doctype html>
-<html lang="zh-CN" class="mini-html">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#07090d">
-<title>{_h(title)} | ASMR 收藏馆</title>
-<link rel="stylesheet" href="/ui/app.css?v={UI_VERSION}">
-</head>
-<body class="mini-body">
-<main class="mini-wrap">
-{"".join(body)}
-</main>
-<script defer src="/ui/app.js?v={UI_VERSION}"></script>
-</body>
-</html>
-"""
-        return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#07090d">
-<title>{_h(title)} | ASMR 收藏馆</title>
-<link rel="stylesheet" href="/ui/app.css?v={UI_VERSION}">
-</head>
-<body>
-<div id="nav-loading" class="nav-loading" aria-hidden="true" role="status">
-  <div class="nav-loading-bar" id="nav-loading-bar"></div>
-  <div class="nav-loading-panel">
-    <span class="nav-loading-spin" aria-hidden="true"></span>
-    <span id="nav-loading-text">加载中…</span>
-  </div>
-</div>
-<header class="top">
-  <a class="brand" href="/">
-    <span class="brand-mark" aria-hidden="true">
-      <svg class="brand-ico" viewBox="0 0 16 16" width="14" height="14" fill="none">
-        <rect x="1.5" y="6" width="2.2" height="4" rx="1" fill="currentColor"/>
-        <rect x="4.9" y="3.5" width="2.2" height="9" rx="1" fill="currentColor"/>
-        <rect x="8.3" y="5" width="2.2" height="6" rx="1" fill="currentColor"/>
-        <rect x="11.7" y="2.5" width="2.2" height="11" rx="1" fill="currentColor"/>
-      </svg>
-    </span>
-    ASMR <span>收藏馆</span>
-  </a>
-  <nav id="top-nav" aria-label="主导航">
-    <a href="/" data-nav="home">首页</a>
-    <a href="/browse" data-nav="discover">发现</a>
-    <a href="/posts" data-nav="library">收藏</a>
-    <a href="/recordings" data-nav="local">本地</a>
-  </nav>
-</header>
-<main class="wrap" id="page-top">
-{"".join(body)}
-</main>
-<script defer src="/ui/app.js?v={UI_VERSION}"></script>
-</body>
-</html>
-"""

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from . import security_lists as _security_lists
 from .security_lists import (
     ASSET_DOMAINS as DEFAULT_ASSET_DOMAINS,
 )
@@ -40,6 +41,9 @@ from .security_lists import (
 # the single source of truth shared with guards.py and
 # viewer/player_guard.py. Edit the tables there, not here. They stay
 # re-exported from this module (see __all__) so existing importers work.
+# ``security_lists`` is also kept as a module handle because the source
+# ranking table must be read *at bootstrap time* (see build_page_bootstrap)
+# rather than captured once at import.
 
 _MEDIA_CONTEXTS = frozenset(
     {"media", "fetch", "xhr", "websocket", "eventsource", "manifest", "other"}
@@ -635,15 +639,24 @@ _PAGE_BOOTSTRAP_TEMPLATE = r"""
   const pickServer = () => {
     if (state.server) return false;
     const buttons = Array.from(document.querySelectorAll('button[data-url],a[data-url]'));
-    const rank = (el) => {
-      const server = (el.getAttribute('data-server') || '').toLowerCase();
-      const url = (el.getAttribute('data-url') || '').toLowerCase();
-      const text = (el.textContent || '').trim().toUpperCase();
-      if (server === 'byse' || text === 'BI' || url.indexOf('bysetayico') >= 0) return 0;
-      if (server === 'upnshare' || text === 'UP' || url.indexOf('upn.one') >= 0) return 1;
-      if (server === 'abyss' || text === 'AB' || url.indexOf('abyss') >= 0) return 2;
-      return 9;
+    // Server preference comes from policy.source_ranking, which
+    // build_page_bootstrap renders out of security_lists.SOURCE_RANKING --
+    // the same table player_resolver._rank reads. Do not inline the order
+    // here again; that is exactly the drift this replaced.
+    const rankOf = (server, url, text) => {
+      const tiers = policy.source_ranking || [];
+      for (let i = 0; i < tiers.length; i += 1) {
+        const tier = tiers[i];
+        if ((tier.servers || []).indexOf(server) >= 0 || text === tier.label ||
+            (tier.markers || []).some((marker) => url.indexOf(marker) >= 0)) return tier.rank;
+      }
+      return policy.source_ranking_default;
     };
+    const rank = (el) => rankOf(
+      (el.getAttribute('data-server') || '').toLowerCase(),
+      (el.getAttribute('data-url') || '').toLowerCase(),
+      (el.textContent || '').trim().toUpperCase()
+    );
     buttons.sort((a, b) => rank(a) - rank(b));
     const best = buttons.find((el) => playerUrl(el.getAttribute('data-url') || ''));
     if (!best) return false;
@@ -822,6 +835,10 @@ def build_page_bootstrap(policy: ShieldPolicy | Mapping[str, Any] | Any | None =
         "allowed_domains": list(resolved.allowed_domains),
         "blocked_hosts": list(resolved.blocked_hosts),
         "block_url_keywords": list(resolved.block_url_keywords),
+        # Read at call time (not import time) so the injected order always
+        # tracks security_lists.SOURCE_RANKING.
+        "source_ranking": [tier.as_payload() for tier in _security_lists.SOURCE_RANKING],
+        "source_ranking_default": _security_lists.SOURCE_RANKING_DEFAULT,
     }
     encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     return _PAGE_BOOTSTRAP_TEMPLATE.replace("__POLICY_JSON__", encoded)
@@ -1535,6 +1552,28 @@ class GuardedWebViewPlayer:
                     callback()
 
 
+def export_mobile_blocklist(policy: ShieldPolicy | Mapping[str, Any] | None = None) -> dict:
+    """Serialize the shield policy for the Android APK WebView shell.
+
+    The APK has no Python runtime; it replays the same decisions from this
+    JSON asset (``android/app/src/main/assets/blocklist.json``). Keep the
+    asset in sync with the Python tables — ``tests`` asserts equality, so
+    regenerating after any list change is mandatory:
+
+        python -m asmrlib_archiver.mobile_blocklist
+    """
+
+    resolved = ShieldPolicy.from_config(policy) if policy is not None else ShieldPolicy()
+    return {
+        "version": 1,
+        "player_domains": sorted(resolved.player_domains),
+        "asset_domains": sorted(resolved.asset_domains),
+        "blocked_hosts": sorted(resolved.blocked_hosts),
+        "block_url_keywords": sorted(resolved.block_url_keywords),
+        "allow_subdomains": bool(resolved.allow_subdomains),
+    }
+
+
 # Naming used by a few integrations while the old sandbox was being removed.
 OnlineShieldWindow = GuardedWebViewPlayer
 
@@ -1546,6 +1585,7 @@ __all__ = [
     "DEFAULT_PLAYER_DOMAINS",
     "GuardedWebViewPlayer",
     "OnlineShieldWindow",
+    "export_mobile_blocklist",
     "ShieldBinding",
     "ShieldDecision",
     "ShieldPolicy",

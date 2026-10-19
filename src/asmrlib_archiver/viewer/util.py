@@ -13,8 +13,11 @@ def _player_tag(suffix: str, src: str, *, autoplay: bool = False) -> str:
     audio_ext = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
     tag = "audio" if suffix in audio_ext else "video"
     extra = " autoplay" if autoplay else ""
+    # playsinline (+ webkit alias): iPhone Safari otherwise refuses inline
+    # playback or forces fullscreen — iOS-only attribute pair.
+    inline = " playsinline webkit-playsinline" if tag == "video" else ""
     return (
-        f'<{tag} controls preload="metadata"{extra} '
+        f'<{tag} controls preload="metadata"{extra}{inline} '
         f'src="{_h(src)}"></{tag}>'
     )
 

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 PAGE_SIZE = 30
+# ``manifest-src`` is not optional even though the manifest is same-origin:
+# with ``default-src 'none'`` and no ``manifest-src``, the browser falls back
+# to the default and refuses the web app manifest, so "add to home screen"
+# silently loses the app name, icon and standalone display.
 DEFAULT_CSP = (
     "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
     "media-src 'self'; form-action 'self'; base-uri 'none'; frame-src 'none'; "
-    "object-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self'; connect-src 'self'"
+    "object-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self'; "
+    "connect-src 'self'; manifest-src 'self'"
 )
 # Frame preview feature removed to reduce bundle size (no ffmpeg dependency).
 TOOL_CSP = (
     "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
     "media-src 'self'; form-action 'self'; base-uri 'none'; frame-src 'none'; "
-    "object-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self'; connect-src 'self'"
+    "object-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self'; "
+    "connect-src 'self'; manifest-src 'self'"
 )
 # Watch pages only host local playback or an external-browser hand-off.
 WATCH_CSP = (
@@ -232,6 +238,27 @@ function _callDesktop(name) {
 function openDesktopOnline(url) {
   var target = String(url || '');
   if (!/^https?:\/\//i.test(target)) return false;
+  // APK shell: play TOP-LEVEL in the app's own shielded WebView — the same
+  // environment the desktop controlled player uses. Sandboxing Byse-style
+  // two-hop embeds inside an iframe breaks them (404), so resolve the bare
+  // player URL server-side and navigate the WebView there; ShieldRules
+  // gates every request and redirect.
+  if (window.__asmrlibInApk) {
+    if (window.__asmrlibLoading) {
+      window.__asmrlibLoading('正在解析纯净播放地址…', { soft: true });
+    }
+    fetch('/api/resolve-player?url=' + encodeURIComponent(target))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (window.__asmrlibLoadingDone) window.__asmrlibLoadingDone();
+        location.href = (d && d.ok && d.player_url) ? d.player_url : target;
+      })
+      .catch(function () {
+        if (window.__asmrlibLoadingDone) window.__asmrlibLoadingDone();
+        location.href = target;
+      });
+    return false;
+  }
   // The desktop bridge owns the controlled player. It is responsible for
   // popup/ad interception and must receive the exact approved URL.
   try {
@@ -258,12 +285,12 @@ function openDesktopOnline(url) {
     }
   } catch (e) {}
   if (_callDesktop('open_online_player', target)) return false;
-  // ``serve`` mode has no controlled browser. Keep the click useful by
-  // falling back to the same system-browser hand-off as the original link.
-  if (window.__asmrlibToast) {
-    window.__asmrlibToast('桌面版会自动拦截弹窗与广告跳转；当前使用系统浏览器打开…');
-  }
-  return openDesktopExternal(target);
+  // No desktop bridge (serve mode, phone browser, APK shell): play in-app
+  // via the sandboxed /play page — bare player embed, popup/redirect
+  // interception at the iframe level, never a system-browser hand-off.
+  location.href = '/play?url=' + encodeURIComponent(target) +
+    '&title=' + encodeURIComponent(document.title.split('|')[0].trim() || '在线播放');
+  return false;
 }
 function openDesktopExternal(url) {
   var target = String(url || '');
@@ -271,7 +298,11 @@ function openDesktopExternal(url) {
   if (_callDesktop('open_external_url', target)) return false;
   try {
     var w = window.open(target, '_blank', 'noopener,noreferrer');
-    if (!w && window.__asmrlibToast) window.__asmrlibToast('请允许浏览器弹窗后重试');
+    // With `noopener` window.open() always returns null by spec; in the APK
+    // the navigation still happens in-place and the native shield takes over.
+    if (!w && !window.__asmrlibInApk && window.__asmrlibToast) {
+      window.__asmrlibToast('请允许浏览器弹窗后重试');
+    }
   } catch (e) {
     if (window.__asmrlibToast) window.__asmrlibToast('无法打开链接');
   }
@@ -293,6 +324,7 @@ _UI_JS = r"""
     try {
       if (!toastHost) {
         toastHost = document.createElement('div');
+        toastHost.className = 'asmrlib-toast-host';
         toastHost.style.cssText =
           'position:fixed;bottom:22px;left:50%;transform:translateX(-50%);' +
           'z-index:2147483646;display:flex;flex-direction:column;gap:8px;' +
@@ -1660,6 +1692,66 @@ body.has-lightbox { overflow: hidden; }
 .rec-card-player { grid-column: 1 / -1; display: none; }
 .rec-card-player video { width: 100%; max-height: 48vh; border-radius: 10px; background: #000; }
 
+/* Honest state vocabulary: a file is either servable, gone, or unreferenced.
+   A broken record is never hidden and never looks playable. */
+.rec-state {
+  font-family: var(--mono); font-size: .74rem; font-weight: 700;
+  border-radius: 999px; padding: .14rem .55rem; white-space: nowrap;
+}
+.rec-state-ok {
+  color: #6ee7a8; background: rgba(110, 231, 168, .12);
+  border: 1px solid rgba(110, 231, 168, .32);
+}
+.rec-state-missing {
+  color: #ffb4a2; background: rgba(255, 138, 110, .14);
+  border: 1px solid rgba(255, 138, 110, .38);
+}
+.rec-state-orphan {
+  color: #ffd479; background: rgba(255, 212, 121, .12);
+  border: 1px solid rgba(255, 212, 121, .34);
+}
+.rec-card-missing { border-color: rgba(255, 138, 110, .34); }
+.rec-card-missing:hover { border-color: rgba(255, 138, 110, .55); }
+.rec-note { font-size: .72rem; }
+.rec-relink {
+  max-width: 22ch; padding: .28rem .45rem; font-size: .78rem;
+  border-radius: 8px; border: 1px solid var(--line-strong);
+  background: rgba(10, 16, 24, .8); color: inherit;
+}
+
+/* ---------- Storage / integrity ---------- */
+.store-table { display: flex; flex-direction: column; gap: .35rem; }
+.store-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto 5rem 6rem;
+  gap: .5rem .9rem; align-items: center;
+  background: rgba(10, 16, 24, .5); border: 1px solid var(--line);
+  border-radius: 12px; padding: .55rem .8rem; font-size: .88rem;
+}
+.store-row-head { background: none; border: none; padding: 0 .8rem; font-size: .76rem; }
+.store-row-head span { color: var(--faint); }
+.store-row-total { border-color: var(--line-strong); }
+.store-cell-main { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.store-path { font-size: .74rem; word-break: break-all; }
+.store-kind-cache { color: #7aa2ff; font-size: .8rem; }
+.store-kind-owned { color: #6ee7a8; font-size: .8rem; }
+.store-list { list-style: none; display: flex; flex-direction: column; gap: .45rem; margin: 0; padding: 0; }
+.store-line {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: .5rem .8rem; align-items: center;
+  background: rgba(10, 16, 24, .5); border: 1px solid var(--line);
+  border-radius: 12px; padding: .55rem .8rem; font-size: .86rem;
+}
+.store-line-main { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.store-link { color: var(--accent); text-decoration: none; }
+.store-link:hover { text-decoration: underline; }
+.store-note { font-size: .76rem; }
+
+@media (max-width: 720px) {
+  .store-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .store-row-head { display: none; }
+  .store-line { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ---------- Pager ---------- */
 #page-top { scroll-margin-top: 4.5rem; }
 .pager {
@@ -2098,4 +2190,267 @@ _CSS += """
 """
 
 _CSS += _CINEMA_CSS
+
+# --------------------------------------------------------------------------- mobile layer
+#
+# Appended last so it wins the cascade over the cinema layer at equal
+# specificity. Covers: network-suitability banner, phone app-feel (bottom
+# tab bar with icons, safe areas, tap targets), and APK hand-off hints.
+_CSS += """
+/* ---------- Network suitability banner ---------- */
+.net-banner {
+  position: fixed;
+  left: 50%; transform: translateX(-50%);
+  bottom: 18px;
+  z-index: 900;
+  display: none;
+  align-items: center; gap: .65rem;
+  max-width: min(680px, 94vw);
+  padding: .75rem 1rem;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+  background: rgba(17, 24, 38, .97);
+  box-shadow: var(--shadow);
+  font-size: .88rem;
+}
+.net-banner.is-on { display: flex; }
+.net-banner.is-bad { border-color: rgba(248, 113, 113, .55); }
+.net-banner.is-warn { border-color: rgba(245, 158, 11, .5); }
+.net-dot {
+  width: .6rem; height: .6rem; border-radius: 50%;
+  flex-shrink: 0; background: var(--faint);
+}
+.net-banner.is-bad .net-dot {
+  background: var(--warn); box-shadow: 0 0 10px rgba(248, 113, 113, .8);
+}
+.net-banner.is-warn .net-dot {
+  background: var(--accent-3); box-shadow: 0 0 10px rgba(245, 158, 11, .7);
+}
+.net-banner-text {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: .1rem;
+}
+.net-banner-title { font-weight: 750; }
+.net-banner-sub { color: var(--muted); font-size: .8rem; line-height: 1.45; }
+.net-retest, .net-close {
+  flex-shrink: 0; cursor: pointer; font: inherit;
+  border: 1px solid var(--line-strong); border-radius: 9px;
+  background: rgba(255, 255, 255, .05); color: var(--text);
+  padding: .45rem .8rem; font-weight: 650;
+  min-height: 38px;
+}
+.net-retest:hover {
+  border-color: rgba(122, 162, 255, .5);
+  background: rgba(122, 162, 255, .12);
+}
+.net-close { padding: .45rem .6rem; }
+.net-close:hover { color: var(--warn); border-color: rgba(248, 113, 113, .4); }
+
+/* ---------- App-feel polish (all viewports) ---------- */
+a, button, select, label { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+.top nav a .nav-ico { display: none; }
+.top { padding-top: max(.65rem, env(safe-area-inset-top)); }
+
+/* ---------- Phone interaction pass (≤767px) ---------- */
+@media (max-width: 767px) {
+  /* backdrop-filter makes .top the containing block for position:fixed
+     descendants — the bottom tab bar would pin inside the header instead of
+     the viewport. Drop the blur on phones; the bar is nearly opaque anyway. */
+  .top { backdrop-filter: none; padding-top: max(.55rem, env(safe-area-inset-top)); }
+  .net-banner {
+    left: .7rem; right: .7rem; transform: none;
+    bottom: calc(64px + env(safe-area-inset-bottom) + 8px);
+    max-width: none;
+    flex-wrap: wrap;
+  }
+  .net-banner-text { flex: 1 1 auto; min-width: 12rem; }
+  .asmrlib-toast-host { bottom: calc(72px + env(safe-area-inset-bottom)) !important; }
+  #top-nav { gap: 2px; }
+  .top nav a, .top nav a:first-child {
+    flex-direction: column; gap: 3px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  }
+  .top nav a .nav-ico { display: block; flex-shrink: 0; }
+  .top nav a .nav-label { line-height: 1; }
+  /* hero-main centers children; give the action row its full width back so
+     the flex-basis:100% buttons really span edge to edge. */
+  .detail-hero-actions, .detail-hero-actions .action-btn { width: 100%; }
+  .chip { padding: .5rem .95rem; font-size: .92rem; }
+  .chip-x { font-size: .95rem; padding: .2rem .3rem; }
+  .text-link { padding: .3rem .1rem; }
+  .live-feed-pager .button { min-height: 44px; flex: 1; }
+  .pager-btn { min-height: 42px; }
+  .search input, .search button { min-height: 46px; }
+  .tag-add input { min-height: 42px; }
+  .section-foot .button { min-height: 44px; }
+}
+"""
+
+# --------------------------------------------------------------------------- liquid glass layer
+#
+# Frosted translucent surfaces for the in-app player page and the phone
+# shell: floating glass dock, glass chips/bars, specular top highlight.
+_CSS += """
+:root {
+  --glass-bg: rgba(18, 24, 36, .60);
+  --glass-bg-soft: rgba(255, 255, 255, .06);
+  --glass-line: rgba(255, 255, 255, .15);
+  --glass-line-soft: rgba(255, 255, 255, .09);
+  --glass-spec: inset 0 1px 0 rgba(255, 255, 255, .14);
+  --glass-blur: blur(22px) saturate(1.6);
+  --glass-shadow: 0 14px 40px rgba(0, 0, 0, .48);
+}
+body.has-play-bar { background: radial-gradient(90% 40% at 50% -10%, rgba(122,162,255,.12), transparent 60%), #05070b; }
+.glass-panel {
+  background: linear-gradient(155deg, rgba(255,255,255,.09), rgba(255,255,255,.03)), var(--glass-bg);
+  border: 1px solid var(--glass-line);
+  border-radius: 18px;
+  box-shadow: var(--glass-spec), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.glass-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; flex-shrink: 0;
+  border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--glass-line-soft);
+  background: var(--glass-bg-soft);
+  color: var(--text); font: inherit; font-size: 1.05rem; line-height: 1;
+  transition: background .15s ease, border-color .15s ease;
+}
+.glass-btn:hover { background: rgba(255,255,255,.12); border-color: var(--glass-line); }
+.glass-badge {
+  flex-shrink: 0;
+  font-size: .68rem; font-weight: 700; letter-spacing: .06em;
+  padding: .22rem .6rem; border-radius: 999px;
+  color: #9be7b4;
+  background: rgba(63, 186, 116, .13);
+  border: 1px solid rgba(63, 186, 116, .35);
+}
+.glass-chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .5rem .95rem; min-height: 40px;
+  border-radius: 999px; cursor: pointer;
+  font: inherit; font-size: .86rem; font-weight: 620; color: var(--text);
+  background: var(--glass-bg-soft);
+  border: 1px solid var(--glass-line-soft);
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.glass-chip:hover { background: rgba(255,255,255,.11); border-color: var(--glass-line); }
+.glass-chip.is-on {
+  background: linear-gradient(120deg, rgba(122,162,255,.28), rgba(167,139,250,.2));
+  border-color: rgba(148, 180, 255, .55);
+  box-shadow: var(--glass-spec), 0 6px 18px rgba(90, 120, 220, .25);
+  color: #eaf1ff;
+}
+
+/* ---------- /play — in-app player page ---------- */
+.play-bar {
+  position: sticky;
+  top: calc(.55rem + env(safe-area-inset-top));
+  z-index: 30;
+  display: flex; align-items: center; gap: .6rem;
+  margin: .55rem .7rem .8rem;
+  padding: .5rem .6rem;
+  border-radius: 16px;
+  background: linear-gradient(155deg, rgba(255,255,255,.08), rgba(255,255,255,.03)), var(--glass-bg);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-spec), var(--glass-shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.play-title {
+  flex: 1; min-width: 0;
+  font-size: .95rem; font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.play-stage {
+  margin: 0 .7rem;
+  aspect-ratio: 16 / 9;
+  border-radius: 18px; overflow: hidden;
+  background: #000;
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-spec), 0 20px 54px rgba(0, 0, 0, .55);
+  /* Anchors the "every source failed" panel over the empty player. */
+  position: relative;
+}
+.play-frame { width: 100%; height: 100%; border: 0; display: block; background: #000; }
+.play-dock {
+  padding: .85rem .7rem calc(1rem + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: .65rem;
+}
+.play-sources {
+  display: flex; flex-wrap: wrap; gap: .45rem;
+  padding: .6rem;
+}
+.play-links { display: flex; flex-wrap: wrap; gap: .45rem; }
+.play-hint { font-size: .78rem; line-height: 1.5; margin: .1rem 0 0; padding: 0 .3rem; }
+
+/* Source rows carry their measured verdict: name on top, why-it-ranks-here
+   underneath. A cooling source stays selectable (manual override still wins)
+   but reads as the last resort it currently is. */
+.play-src {
+  display: flex; flex-direction: column; align-items: flex-start; gap: .12rem;
+  text-align: left; max-width: 100%;
+}
+.play-src-name { font-weight: 650; }
+.play-src-hint { font-size: .7rem; font-weight: 500; opacity: .72; }
+.play-src.is-cooling { opacity: .58; }
+.play-src.is-cooling .play-src-hint { color: var(--warn); opacity: .95; }
+
+/* Every candidate failed: an explanation and a retry, never a blank player. */
+.play-fail {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: .5rem; padding: 1.1rem; text-align: center;
+  background: rgba(7, 9, 13, .95);
+}
+.play-fail[hidden] { display: none; }
+.play-fail-glyph { font-size: 1.9rem; }
+.play-fail-title { margin: 0; font-size: 1rem; }
+.play-fail-reason {
+  margin: 0; max-width: 46ch; font-size: .82rem; line-height: 1.6;
+  color: var(--muted);
+}
+.play-fail-hint { font-size: .76rem; margin: 0; max-width: 46ch; }
+.play-fail-actions { display: flex; gap: .5rem; margin-top: .3rem; }
+
+/* ---------- Phone: floating glass dock replaces the flat tab bar ---------- */
+@media (max-width: 767px) {
+  body { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
+  .wrap { padding-bottom: calc(2rem + env(safe-area-inset-bottom) + 24px); }
+  #top-nav {
+    left: .6rem; right: .6rem; bottom: calc(.5rem + env(safe-area-inset-bottom));
+    height: calc(62px + env(safe-area-inset-bottom));
+    padding: 6px 6px env(safe-area-inset-bottom);
+    border-radius: 22px;
+    background: linear-gradient(155deg, rgba(255,255,255,.09), rgba(255,255,255,.03)), rgba(12, 16, 26, .72);
+    border: 1px solid var(--glass-line);
+    border-bottom: 1px solid var(--glass-line);
+    box-shadow: var(--glass-spec), var(--glass-shadow);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+  .top nav a, .top nav a:first-child { border-radius: 16px; }
+  .top nav a.is-active {
+    background: linear-gradient(120deg, rgba(122,162,255,.30), rgba(167,139,250,.20));
+    box-shadow: var(--glass-spec), inset 0 0 0 1px rgba(148,180,255,.35);
+  }
+  .net-banner {
+    background: linear-gradient(155deg, rgba(255,255,255,.07), rgba(255,255,255,.02)), rgba(12, 16, 26, .78);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-line);
+    bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+  .asmrlib-toast-host { bottom: calc(84px + env(safe-area-inset-bottom)) !important; }
+  .action-btn, .button {
+    background: rgba(255, 255, 255, .06);
+    border-color: rgba(255, 255, 255, .14);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  }
+  .top { background: rgba(8, 11, 17, .60); }
+}
+"""
 

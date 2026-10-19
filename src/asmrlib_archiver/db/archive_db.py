@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .base import DbConnection
+from .health import SourceHealthRepo
 from .items import ItemRepo
 from .media import MediaRepo
 from .seeds import SeedRepo
@@ -10,10 +11,12 @@ from .stats import StatsRepo
 from .tag_pages import TagPageRepo
 
 
-class ArchiveDb(SeedRepo, TagPageRepo, ItemRepo, MediaRepo, StatsRepo):
+class ArchiveDb(
+    SeedRepo, TagPageRepo, ItemRepo, MediaRepo, SourceHealthRepo, StatsRepo
+):
     """面向调用方的入口 facade。
 
-    通过多继承把 5 个单职责 repo 的方法聚合到一个对象上，调用方
+    通过多继承把 6 个单职责 repo 的方法聚合到一个对象上，调用方
     （crawler / viewer / export / import_media / cli）保持原 API 不变。
     每个Repo 只负责一张或一组紧密相关的表；ArchiveDb 仅负责连接生命周期
     和 schema 初始化。

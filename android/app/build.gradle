@@ -1,0 +1,33 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.asmrlib.archiver"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.asmrlib.archiver"
+        // 26 = adaptive-icon era (Android 8.0); keeps the project PNG-free.
+        minSdk 26
+        targetSdk 34
+        versionCode 26
+        versionName "1.8"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    // Discover-page feed parser (Java port of parser.py's card rules).
+    implementation "org.jsoup:jsoup:1.18.1"
+}

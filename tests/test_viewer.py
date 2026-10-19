@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import http.client
+import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from urllib.parse import quote
@@ -8,6 +12,7 @@ from urllib.parse import quote
 from asmrlib_archiver.archive_html import is_safe_archive_html, render_detail_archive
 from asmrlib_archiver.config import AppConfig
 from asmrlib_archiver.db import ArchiveDb
+from asmrlib_archiver.local_audit import audit_local_media
 from asmrlib_archiver.models import MediaCandidate, ParsedPage
 from asmrlib_archiver.viewer import ArchiveViewer
 
@@ -120,7 +125,9 @@ class ViewerTests(unittest.TestCase):
 
         self.assertIn("function openDesktopOnline(url)", APP_JS)
         self.assertIn("_callDesktop('open_online_player', target)", APP_JS)
-        self.assertIn("return openDesktopExternal(target)", APP_JS)
+        # Without the desktop bridge (phone browser / APK), playback stays
+        # in-app via the sandboxed /play page, not a system-browser hand-off.
+        self.assertIn("'/play?url=' + encodeURIComponent(target)", APP_JS)
         self.assertNotIn("getBrowserChoice", APP_JS)
         self.assertNotIn("openDesktopOnlineMini", APP_JS)
         self.assertNotIn("recordDesktopOnline", APP_JS)
@@ -182,20 +189,171 @@ class ViewerTests(unittest.TestCase):
         self.assertNotIn("data-live-feed-mode='rail'", home)
         self.assertNotIn("data-cinema-rail", home)
 
+    def test_cover_proxy_only_accepts_hosts_the_archive_uses(self) -> None:
+        """The proxy must not be an open relay into the LAN.
+
+        asmrlib.com is a configured domain (allowed), example.org is not in
+        the config and not referenced by any stored cover, so it is refused.
+        """
+        viewer = self.viewer
+        self.assertIn("asmrlib.com", viewer._cover_allow_hosts())
+        self.assertNotIn("example.org", viewer._cover_allow_hosts())
+        for bad in [
+            "http://example.org/a.jpg",
+            "file:///etc/passwd",
+            "http://127.0.0.1:8765/",
+            "not-a-url",
+        ]:
+            with self.subTest(url=bad):
+                status = {}
+
+                class _Handler:
+                    def send_response(self, code):
+                        status["code"] = code
+
+                    def send_header(self, *_a, **_k):
+                        pass
+
+                    def end_headers(self):
+                        pass
+
+                    @property
+                    def wfile(self):
+                        return _Sink()
+
+                class _Sink:
+                    def write(self, _b):
+                        pass
+
+                viewer._send_cover(_Handler(), bad)
+                self.assertNotEqual(status.get("code"), 200)
+
+    def test_cover_proxy_caches_to_disk_and_is_immutable(self) -> None:
+        """A fetched cover lands on disk once and is served immutable after."""
+        viewer = self.viewer
+        url = "https://asmrlib.com/media/cover.jpg"
+        target = (
+            self.data
+            / "covers"
+            / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".jpg")
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\xff\xd8\xff\xe0jpeg-bytes")
+
+        seen: dict[str, object] = {}
+
+        class _Handler:
+            def send_response(self, code):
+                seen["code"] = code
+
+            def send_header(self, key, value):
+                seen[str(key).lower()] = value
+
+            def end_headers(self):
+                pass
+
+            @property
+            def wfile(self):
+                return _Sink()
+
+        class _Sink:
+            def write(self, data):
+                seen["body"] = data
+
+        viewer._send_cover(_Handler(), url)
+        self.assertEqual(seen["code"], 200)
+        self.assertEqual(seen["body"], b"\xff\xd8\xff\xe0jpeg-bytes")
+        # immutable: the filename is a hash of the URL, so a hit cannot go stale
+        self.assertIn("immutable", str(seen.get("cache-control", "")))
+        self.assertTrue(target.is_file())
+
+    def test_media_save_allowlist_uses_recorded_hosts_but_rejects_loopback(self) -> None:
+        # The save endpoint must accept real player hosts already referenced by
+        # the archive, but never private/loopback targets (SSRF surface).
+        self.assertIn("bysetayico.com", self.viewer._media_allow_hosts())
+        for host in ("127.0.0.1", "localhost", "::1", "evil.example.com"):
+            self.assertNotIn(host, self.viewer._media_allow_hosts())
+
+    def test_media_save_rejects_player_html_as_fake_success(self) -> None:
+        # A player/embed URL responds with HTML. The old save worker wrote that
+        # 1.6 KB page to a .bin and called it success — it was not a video.
+        # Mock the HTTP response so this regression test is deterministic.
+        from unittest.mock import patch
+
+        from asmrlib_archiver.media_save import save_media
+
+        class _Response:
+            headers = {"content-type": "text/html; charset=utf-8"}
+            is_redirect = False
+            url = "https://bysetayico.com/e/embed-not-media"
+
+            def raise_for_status(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def stream(self, method, url, **kwargs):
+                # The real client receives follow_redirects/timeout here; the
+                # save path resolves redirects itself so the double just serves
+                # the final response.
+                return _Response()
+
+        with patch("asmrlib_archiver.media_save.httpx.Client", _Client):
+            result = save_media(
+                "https://bysetayico.com/e/embed-not-media",
+                save_dir=self.data / "videos",
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "not_direct_media")
+        self.assertFalse(any((self.data / "videos").glob("*.bin")))
+
+    def test_cover_service_worker_receives_the_real_cover_hosts(self) -> None:
+        """The SW used to get only configured domains, i.e. it cached nothing.
+
+        Every cover in this archive comes from a CDN that list does not name,
+        so the worker silently did nothing on every page load.
+        """
+        from asmrlib_archiver.viewer.ui_assets import cover_service_worker
+
+        body = cover_service_worker(
+            sorted(self.viewer._cover_allow_hosts())
+        ).body.decode("utf-8")
+        self.assertIn("asmrlib.com", body)
+
     def test_home_and_detail_render_cover_image(self) -> None:
         import inspect
 
         from asmrlib_archiver import viewer as viewer_module
 
         home = self.viewer._render_home({})
-        # Card thumbnail on the home grid (cover-thumb, includes remote cover URL).
+        # Card thumbnail on the home grid (cover-thumb). Covers are routed
+        # through the local /cover proxy so they are fetched once for every
+        # client instead of once per page load per browser — see local_cover().
         self.assertIn("cover-thumb", home)
-        self.assertIn("https://asmrlib.com/media/cover.jpg", home)
+        self.assertIn(
+            "/cover?u=https%3A%2F%2Fasmrlib.com%2Fmedia%2Fcover.jpg", home
+        )
         detail = self.viewer._render_detail(self.source)
         # Detail page shows cover as a dedicated poster panel.
         self.assertIn("detail-poster-img", detail)
         self.assertIn(
-            "background-image: url(https://asmrlib.com/media/cover.jpg)", detail
+            "background-image: url(/cover?u=https%3A%2F%2Fasmrlib.com"
+            "%2Fmedia%2Fcover.jpg)",
+            detail,
         )
         # Viewer CSP (DEFAULT_CSP constant, sent as HTTP header by _send_html)
         # must permit remote https images so the cover can load in the browser.
@@ -203,6 +361,71 @@ class ViewerTests(unittest.TestCase):
         send_html_source = inspect.getsource(viewer_module.ArchiveViewer._send_html)
         self.assertIn("Content-Security-Policy", send_html_source)
         self.assertIn("DEFAULT_CSP", send_html_source)
+
+    def test_csp_lets_the_browser_load_the_web_app_manifest(self) -> None:
+        # With `default-src 'none'` and no `manifest-src`, the browser refuses
+        # the manifest outright, so "add to home screen" silently loses the app
+        # name, icon and standalone display — the route returning 200 is not
+        # enough. Found by loading the page in a real browser, not by the tests.
+        from asmrlib_archiver import viewer as viewer_module
+        for name in ("DEFAULT_CSP", "TOOL_CSP"):
+            csp = getattr(viewer_module, name)
+            self.assertIn("manifest-src 'self'", csp, name)
+
+    def test_archive_pages_dont_attach_the_network_banner(self) -> None:
+        # The viewer serves local content on /, /posts, /post/..., /author,
+        # /recordings; painting a red "network unsuitable" banner over the
+        # cinema hero there misleads the user. The banner must only attach
+        # on online pages — found when a real desktop browser showed it on
+        # every archive page.
+        from asmrlib_archiver.viewer.ui_assets import APP_JS
+
+        # Slice out the band module's init() — the only one that mentions
+        # `online` and ends with run(false). The app module's init() runs
+        # currentNav / initFeeds / registerCoverCache and must always run.
+        last_init = APP_JS.rindex("function init()")
+        band_init = APP_JS[last_init:]
+        self.assertIn("online", band_init)
+        self.assertIn("if (!online) return", band_init)
+        self.assertIn("run(false)", band_init)
+        # Local paths must not appear as online triggers; otherwise the
+        # banner would be painted over the archive pages it must skip.
+        for local in ("/posts", "/post/", "/author", "/recordings"):
+            self.assertNotIn(f"'{local}'", band_init)
+        # And the net-banner runtime must still ship so live pages can show it.
+        self.assertIn("__asmrlibNetBannerPreview", APP_JS)
+
+    def test_first_six_covers_paint_eager_above_the_fold(self) -> None:
+        # cover_grid defaults to lazy; without a hint the first viewport's
+        # right-hand cards sat blank until the user scrolled. The fix is in
+        # _post_cards (not cover_card itself, so explicit overrides still
+        # work for future callsites). Seed seven items so the boundary
+        # between eager and lazy is exercised in both halves.
+        import re
+
+        for i in range(7):
+            url = f"https://asmrlib.com/posts/aaaaaaaaaaaa000000000000000000000{i}"
+            self.viewer.db.add_seed(url)
+            self.viewer.db.update_item_result(
+                url,
+                title=f"Sample {i}",
+                published_at="2026-07-01",
+                cover=f"https://asmrlib.com/media/cover-{i}.jpg",
+                status="archived",
+                html_path=str(self.data / "html" / f"sample-{i}.html"),
+            )
+        html = self.viewer._render_list({})
+        # Match each cover-thumb's loading value with a regex that anchors
+        # on the cover-thumb div boundary — naive string scans misread
+        # class='cover-grid' or grids that lack a matching loading=' for
+        # some reason.
+        per_card = re.findall(
+            r"class='cover-thumb[^']*'[\s\S]*?loading='([a-z]+)'",
+            html,
+        )
+        self.assertEqual(per_card[:6], ["eager"] * 6)
+        self.assertGreaterEqual(len(per_card), 7)
+        self.assertEqual(per_card[6], "lazy")
 
     def test_detail_omits_cover_when_absent(self) -> None:
         bare_url = "https://asmrlib.com/posts/33333333333333333333333333333333"
@@ -453,6 +676,238 @@ class ViewerTests(unittest.TestCase):
         # A deeper traversal that would escape the archive root must also fail.
         traversal = html.replace('src="../videos/sample.mp3"', 'src="../../etc/passwd"')
         self.assertFalse(is_safe_archive_html(traversal))
+
+    # -------------------------------------------------- local media integrity
+
+    def test_recordings_page_keeps_a_deleted_file_visible_as_missing(self) -> None:
+        """The defect under test: a deleted file used to make its row vanish.
+
+        The page presented itself as the user's library while silently
+        omitting every broken entry, so the row stayed in the database with no
+        way to see or reach it. It must now be rendered, honestly labelled, and
+        offer only the two actions that can actually help.
+        """
+        media = self.data / "videos" / "sample.mp3"
+        self.assertTrue(media.is_file())
+        media.unlink()
+
+        html = self.viewer._render_recordings({})
+        self.assertIn("文件丢失", html)
+        self.assertIn("Audio", html)
+        self.assertIn("sample.mp3", html)
+        self.assertIn("重新关联", html)
+        self.assertIn("移除记录", html)
+        self.assertIn("1 个文件丢失", html)
+        # Nothing may be offered that pretends the file is playable.
+        self.assertNotIn("action-local", html)
+        self.assertNotIn("action-mini", html)
+        self.assertNotIn("/media/videos/sample.mp3", html)
+        self.assertNotIn("本地可用", html)
+
+    def test_recordings_page_still_plays_a_healthy_file(self) -> None:
+        html = self.viewer._render_recordings({})
+        self.assertIn("/media/videos/sample.mp3", html)
+        self.assertIn("播放", html)
+        self.assertIn("小窗", html)
+        self.assertIn("重命名", html)
+        self.assertIn("删除", html)
+        self.assertIn("本地可用", html)
+        self.assertNotIn("文件丢失", html)
+
+    def test_storage_view_reports_orphans_without_a_bulk_cleanup(self) -> None:
+        stray = self.data / "videos" / "stray.mp3"
+        stray.write_bytes(b"s" * 4096)
+
+        html = self.viewer._render_storage({})
+        self.assertIn("孤儿文件", html)
+        self.assertIn("videos/stray.mp3", html)
+        self.assertIn("可重建缓存", html)
+        self.assertIn("自有文件", html)
+        self.assertIn("存储占用", html)
+        # The healthy recording is accounted for, not called an orphan.
+        self.assertNotIn("videos/sample.mp3", html)
+        # Explicit-only: the scan wires no destructive control at all, and
+        # there is deliberately no "clean everything" affordance.
+        self.assertNotIn('onclick="return deleteMedia', html)
+        self.assertNotIn('onclick="return forgetMedia', html)
+        for forbidden in ("清理", "清空", "全部删除", "一键"):
+            self.assertNotIn(forbidden, html, forbidden)
+        self.assertTrue(stray.is_file())
+
+
+class LocalMediaIntegrityRouteTests(unittest.TestCase):
+    """Route-level behaviour for the missing / orphan repairs.
+
+    These run against the real HTTP server because the acceptance criteria are
+    about what an endpoint does to the database *and* to the disk at the same
+    time — a rendered page alone cannot prove the file survived.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.data = root / "data"
+        self.data.mkdir()
+        (self.data / "videos").mkdir()
+        self.config = AppConfig(
+            config_path=root / "config.yaml",
+            output_dir=self.data,
+            database_path=self.data / "archive.sqlite3",
+        )
+        self.viewer = ArchiveViewer(self.config)
+        self.source = "https://asmrlib.com/posts/22222222222222222222222222222222"
+        self.viewer.db.add_seed(self.source)
+        self.viewer.db.update_item_result(
+            self.source,
+            title="Route sample",
+            published_at="2026-07-01",
+            cover="",
+            status="archived",
+            html_path=str(self.data / "html" / "sample.html"),
+        )
+        self.media_path = self.data / "videos" / "route.mp3"
+        self.media_path.write_bytes(b"ID3route")
+        self.media_id = self.viewer.db.attach_local_media(
+            self.source,
+            file_path=str(self.media_path),
+            label="Route",
+            media_url="u-route",
+        )
+        self.server = self.viewer.create_http_server("127.0.0.1", 0)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.host, self.port = self.server.server_address
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        self.viewer.close()
+        self.temp_dir.cleanup()
+
+    def request(self, method: str, path: str, payload: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+        headers = {"Content-Type": "application/json"} if body else {}
+        conn.request(method, path, body=body, headers=headers)
+        response = conn.getresponse()
+        data = response.read()
+        result = response.status, dict(response.getheaders()), data
+        conn.close()
+        return result
+
+    def row(self):
+        return self.viewer.db.conn.execute(
+            "SELECT file_path, status FROM media_candidates WHERE id = ?",
+            (self.media_id,),
+        ).fetchone()
+
+    def count_rows(self) -> int:
+        return int(
+            self.viewer.db.conn.execute(
+                "SELECT COUNT(*) FROM media_candidates"
+            ).fetchone()[0]
+        )
+
+    def test_forget_drops_the_row_and_leaves_the_file_on_disk(self) -> None:
+        self.assertTrue(self.media_path.is_file())
+        status, _, payload = self.request(
+            "POST", "/recordings/forget", {"id": self.media_id}
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["row_removed"])
+        # It must not claim a file removal: nothing was deleted.
+        self.assertNotIn("file_removed", body)
+        self.assertEqual(self.count_rows(), 0)
+        self.assertIsNone(self.row())
+        self.assertTrue(self.media_path.is_file())
+        self.assertEqual(self.media_path.read_bytes(), b"ID3route")
+
+    def test_forget_also_works_when_the_file_is_already_gone(self) -> None:
+        self.media_path.unlink()
+        status, _, payload = self.request(
+            "POST", "/recordings/forget", {"id": self.media_id}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(payload)["ok"])
+        self.assertEqual(self.count_rows(), 0)
+        self.assertFalse(self.media_path.exists())
+
+    def test_relink_points_a_missing_record_at_a_real_file(self) -> None:
+        self.media_path.unlink()
+        replacement = self.data / "videos" / "renamed.mp3"
+        replacement.write_bytes(b"ID3renamed")
+        self.assertIn("文件丢失", self.viewer._render_recordings({}))
+
+        status, _, payload = self.request(
+            "POST",
+            "/recordings/relink",
+            {"id": self.media_id, "path": "videos/renamed.mp3"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(payload)["ok"])
+        row = self.row()
+        self.assertEqual(Path(row["file_path"]), replacement.resolve())
+        self.assertEqual(row["status"], "downloaded")
+
+        # Repaired for real: the record is servable and the file is no longer
+        # an unreferenced orphan.
+        report = audit_local_media(self.viewer.db, self.viewer.root)
+        self.assertEqual(report.missing, ())
+        self.assertEqual(report.orphans, ())
+        html = self.viewer._render_recordings({})
+        self.assertNotIn("文件丢失", html)
+        self.assertIn("/media/videos/renamed.mp3", html)
+        self.assertTrue(replacement.is_file())
+
+    def test_relink_refuses_a_path_outside_the_managed_root(self) -> None:
+        self.media_path.unlink()
+        outside = Path(self.temp_dir.name) / "outside.mp3"
+        outside.write_bytes(b"ID3outside")
+        status, _, payload = self.request(
+            "POST",
+            "/recordings/relink",
+            {"id": self.media_id, "path": "../outside.mp3"},
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "库内找不到这个文件")
+        # The record stays broken rather than pointing at an unservable path.
+        self.assertEqual(str(self.row()["file_path"]), str(self.media_path))
+
+    def test_delete_still_removes_a_healthy_file(self) -> None:
+        status, _, payload = self.request(
+            "POST", "/recordings/delete", {"id": self.media_id}
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["file_removed"])
+        self.assertEqual(self.count_rows(), 0)
+        self.assertFalse(self.media_path.exists())
+
+    def test_storage_route_serves_the_read_only_audit(self) -> None:
+        stray = self.data / "videos" / "stray.mp3"
+        stray.write_bytes(b"s" * 2048)
+        # Break the record so the page has both halves of the audit to show:
+        # a missing record and the orphan that can be attached to it.
+        self.media_path.unlink()
+        status, headers, payload = self.request("GET", "/storage")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        html = payload.decode("utf-8")
+        self.assertIn("文件丢失", html)
+        self.assertIn("孤儿文件", html)
+        self.assertIn("videos/stray.mp3", html)
+        self.assertIn("关联到记录", html)
+        self.assertIn("可重建缓存", html)
+        self.assertIn("自有文件", html)
+        # A plain GET scans and reports; it never repairs or deletes.
+        self.assertTrue(stray.is_file())
+        self.assertEqual(self.count_rows(), 1)
 
 
 if __name__ == "__main__":

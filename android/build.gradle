@@ -1,0 +1,5 @@
+// Root build file. No AndroidX / third-party dependencies anywhere: the app
+// only uses android.* framework APIs, so builds stay reproducible offline.
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
